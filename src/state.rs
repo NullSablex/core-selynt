@@ -62,17 +62,28 @@ pub fn resolve_target_user() -> Result<(u32, u32, String, String)> {
 /// Usa initgroups() para preservar supplementary groups do user (necessário
 /// para acessar binários em paths com restrição de grupo, ex: /usr/local/bin/node).
 pub fn drop_privileges(uid: u32, gid: u32, username: &str) -> Result<()> {
-    let cname = std::ffi::CString::new(username)
-        .context("username inválido para initgroups")?;
+    let cname = std::ffi::CString::new(username).context("username inválido para initgroups")?;
     unsafe {
         if libc::initgroups(cname.as_ptr(), gid) != 0 {
-            anyhow::bail!("initgroups({}) falhou: {}", username, std::io::Error::last_os_error());
+            anyhow::bail!(
+                "initgroups({}) falhou: {}",
+                username,
+                std::io::Error::last_os_error()
+            );
         }
         if libc::setgid(gid) != 0 {
-            anyhow::bail!("setgid({}) falhou: {}", gid, std::io::Error::last_os_error());
+            anyhow::bail!(
+                "setgid({}) falhou: {}",
+                gid,
+                std::io::Error::last_os_error()
+            );
         }
         if libc::setuid(uid) != 0 {
-            anyhow::bail!("setuid({}) falhou: {}", uid, std::io::Error::last_os_error());
+            anyhow::bail!(
+                "setuid({}) falhou: {}",
+                uid,
+                std::io::Error::last_os_error()
+            );
         }
         // Verificação completa: uid, gid, euid, egid
         if libc::geteuid() == 0 || libc::getuid() == 0 {
@@ -83,7 +94,10 @@ pub fn drop_privileges(uid: u32, gid: u32, username: &str) -> Result<()> {
         }
         // Impedir re-escalação de privilégio via execve em binários setuid
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-            anyhow::bail!("prctl(PR_SET_NO_NEW_PRIVS) falhou: {}", std::io::Error::last_os_error());
+            anyhow::bail!(
+                "prctl(PR_SET_NO_NEW_PRIVS) falhou: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
     Ok(())
@@ -98,8 +112,8 @@ pub fn init_state_dir(state_dir: &Path, uid: u32, gid: u32) -> Result<()> {
     let subdirs = [".run", ".sockets", ".proxy"];
 
     // Criar dirs se não existem (só chmod em dirs novos para não desfazer ACLs)
-    for dir in std::iter::once(state_dir.to_path_buf())
-        .chain(subdirs.iter().map(|s| state_dir.join(s)))
+    for dir in
+        std::iter::once(state_dir.to_path_buf()).chain(subdirs.iter().map(|s| state_dir.join(s)))
     {
         if !dir.is_dir() {
             std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {:?}", dir))?;
@@ -140,7 +154,9 @@ fn chown_recursive(path: &Path, uid: u32, gid: u32) -> Result<()> {
 }
 
 pub fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
-    let s = path.to_str().with_context(|| format!("path não-UTF8 {:?}", path))?;
+    let s = path
+        .to_str()
+        .with_context(|| format!("path não-UTF8 {:?}", path))?;
     let c = std::ffi::CString::new(s).with_context(|| format!("path inválido {:?}", path))?;
     if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
         anyhow::bail!("chown {:?}: {}", path, std::io::Error::last_os_error());
@@ -153,17 +169,20 @@ pub fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
 pub fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
     let logs_dir = cwd.join("logs");
     if !logs_dir.is_dir() {
-        std::fs::create_dir_all(&logs_dir)
-            .with_context(|| format!("mkdir {:?}", logs_dir))?;
+        std::fs::create_dir_all(&logs_dir).with_context(|| format!("mkdir {:?}", logs_dir))?;
     }
-    let logs_str = logs_dir.to_str()
+    let logs_str = logs_dir
+        .to_str()
         .with_context(|| format!("caminho não-UTF8 {:?}", logs_dir))?;
     let cpath = std::ffi::CString::new(logs_str)
         .with_context(|| format!("caminho inválido {:?}", logs_dir))?;
     if unsafe { libc::chown(cpath.as_ptr(), uid, gid) } != 0 {
         anyhow::bail!(
             "chown {:?} para {}:{}: {}",
-            logs_dir, uid, gid, std::io::Error::last_os_error()
+            logs_dir,
+            uid,
+            gid,
+            std::io::Error::last_os_error()
         );
     }
     std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o750))
@@ -229,10 +248,10 @@ pub fn list_app_names(state_dir: &Path) -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(&run_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("app") {
-                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.push(name.to_string());
-                }
+            if path.extension().and_then(|e| e.to_str()) == Some("app")
+                && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+            {
+                names.push(name.to_string());
             }
         }
     }

@@ -48,13 +48,10 @@ pub fn has_network_listen(pid: u32) -> bool {
     for entry in entries.flatten() {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             let t = target.to_string_lossy();
-            if let Some(inner) = t
-                .strip_prefix("socket:[")
-                .and_then(|s| s.strip_suffix(']'))
+            if let Some(inner) = t.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']'))
+                && let Ok(inode) = inner.parse::<u64>()
             {
-                if let Ok(inode) = inner.parse::<u64>() {
-                    socket_inodes.insert(inode);
-                }
+                socket_inodes.insert(inode);
             }
         }
     }
@@ -81,10 +78,10 @@ pub fn has_network_listen(pid: u32) -> bool {
                 if state != "0A" {
                     continue;
                 }
-                if let Some(inode) = extract_inode(line) {
-                    if socket_inodes.contains(&inode) {
-                        return true;
-                    }
+                if let Some(inode) = extract_inode(line)
+                    && socket_inodes.contains(&inode)
+                {
+                    return true;
                 }
             }
         }
@@ -94,10 +91,10 @@ pub fn has_network_listen(pid: u32) -> bool {
     for f in &["/proc/net/udp", "/proc/net/udp6"] {
         if let Ok(content) = std::fs::read_to_string(f) {
             for line in content.lines().skip(1) {
-                if let Some(inode) = extract_inode(line) {
-                    if socket_inodes.contains(&inode) {
-                        return true;
-                    }
+                if let Some(inode) = extract_inode(line)
+                    && socket_inodes.contains(&inode)
+                {
+                    return true;
                 }
             }
         }

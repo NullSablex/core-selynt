@@ -10,12 +10,18 @@ use serde_json::json;
 use std::path::PathBuf;
 
 use output::system_error;
-use state::{drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user};
+use state::{
+    drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user,
+};
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "core_selynt", version, about = "Selynt Panel — gerenciador de processos")]
+#[command(
+    name = "core_selynt",
+    version,
+    about = "Selynt Panel — gerenciador de processos"
+)]
 struct Cli {
     /// Ativa modo debug: inclui _debug no JSON de saída
     #[arg(long, global = true)]
@@ -159,7 +165,10 @@ fn main() {
 
     // [ROOT] Criar state_dir + subdirs, chown para o user real
     if let Err(e) = init_state_dir(&state_dir, uid, gid) {
-        system_error("init_failed", &format!("{e:#} (uid={uid}, state_dir={state_dir:?})"));
+        system_error(
+            "init_failed",
+            &format!("{e:#} (uid={uid}, state_dir={state_dir:?})"),
+        );
     }
 
     // [ROOT] Para domains: ler arquivos DA antes do drop (owned por diradmin)
@@ -171,27 +180,32 @@ fn main() {
         };
 
     // [ROOT] Para start: criar {cwd}/logs/ com ownership do user real
-    if let Commands::Start { name } = &cli.command {
-        match load_app_meta(&state_dir, name) {
-            Ok(meta) => {
-                let cwd = PathBuf::from(&meta.cwd);
-                if let Err(e) = init_app_logs_dir(&cwd, uid, gid) {
-                    output::debug(format!("init_app_logs_dir: {e:#}"));
-                }
-            }
-            Err(_) => {} // cmd_start reportará app_not_found
+    if let Commands::Start { name } = &cli.command
+        && let Ok(meta) = load_app_meta(&state_dir, name)
+    {
+        let cwd = PathBuf::from(&meta.cwd);
+        if let Err(e) = init_app_logs_dir(&cwd, uid, gid) {
+            output::debug(format!("init_app_logs_dir: {e:#}"));
         }
     }
 
     // [ROOT] Para admin list: ler dados de todos os users antes do drop
-    let admin_apps = if matches!(cli.command, Commands::Admin { command: AdminCommands::List }) {
+    let admin_apps = if matches!(
+        cli.command,
+        Commands::Admin {
+            command: AdminCommands::List
+        }
+    ) {
         cmd::collect_admin_list()
     } else {
         Vec::new()
     };
 
     // [ROOT] Para admin save-node-versions: detectar + salvar antes do drop
-    let save_nv_result = if let Commands::Admin { command: AdminCommands::SaveNodeVersions { ref indices } } = cli.command {
+    let save_nv_result = if let Commands::Admin {
+        command: AdminCommands::SaveNodeVersions { ref indices },
+    } = cli.command
+    {
         Some(cmd::save_node_versions(indices))
     } else {
         None
@@ -216,9 +230,7 @@ fn main() {
 
         Commands::Start { name } => cmd::cmd_start(&state_dir, &name, &web_user, dbg.as_ref()),
 
-        Commands::Stop { name, timeout } => {
-            cmd::cmd_stop(&state_dir, &name, timeout, dbg.as_ref())
-        }
+        Commands::Stop { name, timeout } => cmd::cmd_stop(&state_dir, &name, timeout, dbg.as_ref()),
 
         Commands::Restart { name } => cmd::cmd_restart(&state_dir, &name, &web_user, dbg.as_ref()),
 
@@ -258,36 +270,41 @@ fn main() {
 
         Commands::Domains { .. } => cmd::cmd_domains(domains_data, dbg.as_ref()),
 
-        Commands::Admin { command: AdminCommands::Version } => {
-            println!("{}", json!({"ok": true, "version": env!("CARGO_PKG_VERSION")}));
+        Commands::Admin {
+            command: AdminCommands::Version,
+        } => {
+            println!(
+                "{}",
+                json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})
+            );
             std::process::exit(0);
         }
 
-        Commands::Admin { command: AdminCommands::List } => {
-            cmd::cmd_admin_list(admin_apps, dbg.as_ref())
-        }
+        Commands::Admin {
+            command: AdminCommands::List,
+        } => cmd::cmd_admin_list(admin_apps, dbg.as_ref()),
 
-        Commands::Admin { command: AdminCommands::DetectNodes } => {
-            cmd::cmd_admin_detect_nodes(dbg.as_ref())
-        }
+        Commands::Admin {
+            command: AdminCommands::DetectNodes,
+        } => cmd::cmd_admin_detect_nodes(dbg.as_ref()),
 
-        Commands::Admin { command: AdminCommands::SaveNodeVersions { .. } } => {
-            match save_nv_result.unwrap() {
-                Ok(val) => {
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("ok".into(), json!(true));
-                    if let serde_json::Value::Object(map) = val {
-                        obj.extend(map);
-                    }
-                    if let Some(d) = dbg.as_ref() {
-                        obj.insert("_debug".into(), d.clone());
-                    }
-                    println!("{}", serde_json::Value::Object(obj));
-                    std::process::exit(0);
+        Commands::Admin {
+            command: AdminCommands::SaveNodeVersions { .. },
+        } => match save_nv_result.unwrap() {
+            Ok(val) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("ok".into(), json!(true));
+                if let serde_json::Value::Object(map) = val {
+                    obj.extend(map);
                 }
-                Err((error, message)) => output::user_error(&error, &message),
+                if let Some(d) = dbg.as_ref() {
+                    obj.insert("_debug".into(), d.clone());
+                }
+                println!("{}", serde_json::Value::Object(obj));
+                std::process::exit(0);
             }
-        }
+            Err((error, message)) => output::user_error(&error, &message),
+        },
     }
 }
 
@@ -297,14 +314,13 @@ fn main() {
 fn read_domains_files(username: &str, filter: Option<&str>) -> Vec<(String, Vec<String>)> {
     let base = format!("/usr/local/directadmin/data/users/{username}");
 
-    let list_content =
-        std::fs::read_to_string(format!("{base}/domains.list")).unwrap_or_default();
+    let list_content = std::fs::read_to_string(format!("{base}/domains.list")).unwrap_or_default();
 
     list_content
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .filter(|d| filter.map_or(true, |f| *d == f))
+        .filter(|d| filter.is_none_or(|f| *d == f))
         .map(|domain| {
             let sub_path = format!("{base}/domains/{domain}.subdomains");
             let subs: Vec<String> = std::fs::read_to_string(&sub_path)
@@ -329,10 +345,7 @@ fn build_debug_base(
     if !enabled {
         return None;
     }
-    let sd = state_dir
-        .and_then(|p| p.to_str())
-        .unwrap_or("")
-        .to_string();
+    let sd = state_dir.and_then(|p| p.to_str()).unwrap_or("").to_string();
     Some(json!({
         "user": user,
         "home": home,

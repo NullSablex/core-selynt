@@ -12,8 +12,7 @@ use crate::acl::apply_acl;
 use crate::output::{debug, success, system_error, user_error};
 use crate::proc::{has_network_listen, is_process_alive, read_proc_starttime, read_proc_uid};
 use crate::state::{
-    AppMeta, atomic_write, list_app_names, load_app_meta, parse_kv, set_perm,
-    validate_name,
+    AppMeta, atomic_write, list_app_names, load_app_meta, parse_kv, set_perm, validate_name,
 };
 
 // ─── Helper de debug ──────────────────────────────────────────────────────────
@@ -80,9 +79,7 @@ fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u32>, 
     if is_process_alive(pid) {
         let started_at: Option<u64> = std::fs::read_to_string(meta_file)
             .ok()
-            .and_then(|c| {
-                parse_kv(&c).get("started_at").and_then(|v| v.parse().ok())
-            });
+            .and_then(|c| parse_kv(&c).get("started_at").and_then(|v| v.parse().ok()));
         ("RUNNING".to_string(), Some(pid), started_at)
     } else {
         ("STOPPED".to_string(), None, None)
@@ -96,10 +93,7 @@ fn signal_sync() {
 
 /// Valida que um valor não contém path traversal (sem `..`, `/`, `\0`)
 fn validate_safe_component(s: &str) -> bool {
-    !s.is_empty()
-        && !s.contains('/')
-        && !s.contains('\0')
-        && !s.contains("..")
+    !s.is_empty() && !s.contains('/') && !s.contains('\0') && !s.contains("..")
 }
 
 /// Tail eficiente: lê as últimas `n` linhas do arquivo sem carregar tudo
@@ -261,7 +255,10 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
 
     // 0. Defense in depth: validar campos antes de usar
     if !validate_safe_component(&meta.entry) {
-        user_error("invalid_entry", "entry contém path traversal — recrie o app");
+        user_error(
+            "invalid_entry",
+            "entry contém path traversal — recrie o app",
+        );
     }
     if !validate_safe_component(&meta.host) {
         user_error("invalid_host", "host contém path traversal — recrie o app");
@@ -309,7 +306,10 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
         std::fs::read_to_string(&env_file)
             .unwrap_or_default()
             .lines()
-            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .filter_map(|l| {
+                l.split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+            })
             .collect()
     } else {
         vec![]
@@ -327,12 +327,15 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
                 meta.node_version.clone()
             };
             // Validar versão mínima do Node.js
-            if let Some(ver) = get_node_version_raw(Path::new(&node_bin)) {
-                if !node_version_ok(&ver) {
-                    user_error("unsupported_node", &format!(
+            if let Some(ver) = get_node_version_raw(Path::new(&node_bin))
+                && !node_version_ok(&ver)
+            {
+                user_error(
+                    "unsupported_node",
+                    &format!(
                         "Node.js {ver} não é suportado. Mínimo: v{NODE_MIN_MAJOR}.{NODE_MIN_MINOR}.0"
-                    ));
-                }
+                    ),
+                );
             }
             let mut c = std::process::Command::new(&node_bin);
             c.arg("--import");
@@ -355,8 +358,7 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
     // setsid: processo filho vira líder de nova sessão
     unsafe {
         cmd.pre_exec(|| {
-            nix::unistd::setsid()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            nix::unistd::setsid().map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         });
     }
@@ -395,8 +397,8 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
         .as_secs();
     let meta_content = format!("uid={my_uid}\nstarttime={starttime}\nstarted_at={started_at}\n");
 
-    if let Err(e) = atomic_write(&meta_file, meta_content.as_bytes())
-        .and_then(|_| set_perm(&meta_file, 0o600))
+    if let Err(e) =
+        atomic_write(&meta_file, meta_content.as_bytes()).and_then(|_| set_perm(&meta_file, 0o600))
     {
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
         let _ = std::fs::remove_file(&pid_file);
@@ -419,12 +421,18 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
             let _ = std::fs::remove_file(&pid_file);
             let _ = std::fs::remove_file(&meta_file);
-            system_error("socket_timeout", "processo não criou o socket Unix no tempo esperado");
+            system_error(
+                "socket_timeout",
+                "processo não criou o socket Unix no tempo esperado",
+            );
         }
         if !is_process_alive(pid) {
             let _ = std::fs::remove_file(&pid_file);
             let _ = std::fs::remove_file(&meta_file);
-            system_error("process_exited", "processo encerrou antes de criar o socket");
+            system_error(
+                "process_exited",
+                "processo encerrou antes de criar o socket",
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -434,13 +442,19 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
     let mut socket_ok = false;
     while Instant::now() < connect_deadline {
         match std::os::unix::net::UnixStream::connect(&socket_path) {
-            Ok(_) => { socket_ok = true; break; }
+            Ok(_) => {
+                socket_ok = true;
+                break;
+            }
             Err(_) => {
                 if !is_process_alive(pid) {
                     let _ = std::fs::remove_file(&pid_file);
                     let _ = std::fs::remove_file(&meta_file);
                     let _ = std::fs::remove_file(&socket_path);
-                    system_error("process_exited", "processo encerrou antes de aceitar conexões no socket");
+                    system_error(
+                        "process_exited",
+                        "processo encerrou antes de aceitar conexões no socket",
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -451,7 +465,10 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
         let _ = std::fs::remove_file(&pid_file);
         let _ = std::fs::remove_file(&meta_file);
         let _ = std::fs::remove_file(&socket_path);
-        system_error("socket_not_accepting", "socket Unix existe mas não está aceitando conexões");
+        system_error(
+            "socket_not_accepting",
+            "socket Unix existe mas não está aceitando conexões",
+        );
     }
 
     // 6. Verificar porta TCP — bloqueado
@@ -470,12 +487,9 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
     }
 
     // 7. Criar marker de proxy
-    if let Err(e) = std::fs::write(&marker_path, b"")
-        .and_then(|_| std::fs::set_permissions(
-            &marker_path,
-            std::fs::Permissions::from_mode(0o644),
-        ))
-    {
+    if let Err(e) = std::fs::write(&marker_path, b"").and_then(|_| {
+        std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o644))
+    }) {
         system_error("marker_failed", &format!("{e:#}"));
     }
 
@@ -545,6 +559,7 @@ pub fn cmd_restart(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Va
     cmd_start(state_dir, name, web_user, dbg)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_add(
     state_dir: &Path,
     name: &str,
@@ -560,7 +575,12 @@ pub fn cmd_add(
 ) -> ! {
     // Resolver cwd: padrão {state_dir}/apps/nodejs/{host}
     let resolved_cwd = cwd.map(str::to_string).unwrap_or_else(|| {
-        state_dir.join("apps").join("nodejs").join(host).to_string_lossy().into_owned()
+        state_dir
+            .join("apps")
+            .join("nodejs")
+            .join(host)
+            .to_string_lossy()
+            .into_owned()
     });
     let cwd = resolved_cwd.as_str();
 
@@ -587,7 +607,10 @@ pub fn cmd_add(
             user_error("app_exists", &format!("app '{name}' já existe"));
         }
         Err(e) => {
-            system_error("write_failed", &format!("criar {}: {e:#}", app_file.display()));
+            system_error(
+                "write_failed",
+                &format!("criar {}: {e:#}", app_file.display()),
+            );
         }
     }
 
@@ -603,8 +626,8 @@ pub fn cmd_add(
         node_version.unwrap_or(""),
     );
 
-    if let Err(e) = atomic_write(&app_file, content.as_bytes())
-        .and_then(|_| set_perm(&app_file, 0o600))
+    if let Err(e) =
+        atomic_write(&app_file, content.as_bytes()).and_then(|_| set_perm(&app_file, 0o600))
     {
         system_error("write_failed", &format!("{e:#}"));
     }
@@ -612,15 +635,18 @@ pub fn cmd_add(
     // Criar diretório cwd
     let cwd_path = PathBuf::from(cwd);
     if let Err(e) = std::fs::create_dir_all(&cwd_path) {
-        user_error("cwd_create_failed", &format!("falha ao criar diretório cwd: {e:#}"));
+        user_error(
+            "cwd_create_failed",
+            &format!("falha ao criar diretório cwd: {e:#}"),
+        );
     }
 
     // Salvar .env no cwd do app
     if !env_vars.is_empty() {
         let env_file = cwd_path.join(".env");
         let env_content = env_vars.join("\n") + "\n";
-        if let Err(e) = atomic_write(&env_file, env_content.as_bytes())
-            .and_then(|_| set_perm(&env_file, 0o600))
+        if let Err(e) =
+            atomic_write(&env_file, env_content.as_bytes()).and_then(|_| set_perm(&env_file, 0o600))
         {
             system_error("write_failed", &format!("{e:#}"));
         }
@@ -631,14 +657,19 @@ pub fn cmd_add(
         let entry_path = cwd_path.join(entry);
         if entry_path.exists() {
             if !is_executable_file(&entry_path) {
-                user_error("entry_not_executable", &format!(
-                    "arquivo '{}' não é executável", entry_path.display()
-                ));
+                user_error(
+                    "entry_not_executable",
+                    &format!("arquivo '{}' não é executável", entry_path.display()),
+                );
             }
             if !is_elf(&entry_path) {
-                user_error("entry_not_elf", &format!(
-                    "arquivo '{}' não é um binário ELF válido", entry_path.display()
-                ));
+                user_error(
+                    "entry_not_elf",
+                    &format!(
+                        "arquivo '{}' não é um binário ELF válido",
+                        entry_path.display()
+                    ),
+                );
             }
         }
     }
@@ -646,17 +677,15 @@ pub fn cmd_add(
     // Scaffold Node.js: gravar template se entry não existir
     if app_type == "node" {
         let entry_path = cwd_path.join(entry);
-        if !entry_path.exists() {
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(bin_dir) = exe.parent() {
-                    if let Some(plugin_dir) = bin_dir.parent() {
-                        let template = plugin_dir.join("templates/node/index.js");
-                        if let Ok(tpl) = std::fs::read_to_string(&template) {
-                            let rendered = tpl.replace("{{APP_NAME}}", name);
-                            let _ = std::fs::write(&entry_path, rendered.as_bytes());
-                        }
-                    }
-                }
+        if !entry_path.exists()
+            && let Ok(exe) = std::env::current_exe()
+            && let Some(bin_dir) = exe.parent()
+            && let Some(plugin_dir) = bin_dir.parent()
+        {
+            let template = plugin_dir.join("templates/node/index.js");
+            if let Ok(tpl) = std::fs::read_to_string(&template) {
+                let rendered = tpl.replace("{{APP_NAME}}", name);
+                let _ = std::fs::write(&entry_path, rendered.as_bytes());
             }
         }
     }
@@ -715,7 +744,13 @@ pub fn cmd_domains(data: Vec<(String, Vec<String>)>, dbg: Option<&Value>) -> ! {
     success(with_debug(json!({ "domains": domains_json }), dbg))
 }
 
-pub fn cmd_logs(state_dir: &Path, name: &str, lines: usize, use_stderr: bool, dbg: Option<&Value>) -> ! {
+pub fn cmd_logs(
+    state_dir: &Path,
+    name: &str,
+    lines: usize,
+    use_stderr: bool,
+    dbg: Option<&Value>,
+) -> ! {
     let meta = match load_app_meta(state_dir, name) {
         Ok(m) => m,
         Err(_) => user_error("app_not_found", &format!("app '{name}' não encontrado")),
@@ -828,7 +863,8 @@ fn detect_node_versions() -> Vec<(String, String)> {
     let nvm_dir_glob = std::env::var("NVM_DIR")
         .ok()
         .filter(|d| {
-            let safe = d.starts_with("/home/") || d.starts_with("/opt/") || d.starts_with("/usr/local/");
+            let safe =
+                d.starts_with("/home/") || d.starts_with("/opt/") || d.starts_with("/usr/local/");
             safe && !d.contains("..")
         })
         .map(|d| format!("{d}/versions/node/*/bin/node"));
@@ -870,7 +906,10 @@ pub fn cmd_admin_detect_nodes(dbg: Option<&Value>) -> ! {
 pub fn save_node_versions(indices: &[usize]) -> Result<Value, (String, String)> {
     let all = detect_node_versions();
     if all.is_empty() {
-        return Err(("no_versions".into(), "Nenhuma versão do Node.js detectada.".into()));
+        return Err((
+            "no_versions".into(),
+            "Nenhuma versão do Node.js detectada.".into(),
+        ));
     }
 
     // Validar índices e coletar selecionados
@@ -880,7 +919,10 @@ pub fn save_node_versions(indices: &[usize]) -> Result<Value, (String, String)> 
 
     for &idx in indices {
         if idx >= all.len() {
-            return Err(("invalid_index".into(), format!("Índice {idx} inválido (máx: {}).", all.len() - 1)));
+            return Err((
+                "invalid_index".into(),
+                format!("Índice {idx} inválido (máx: {}).", all.len() - 1),
+            ));
         }
         let (ref path, ref ver) = all[idx];
         if !seen_ver.insert(ver.clone()) {
@@ -892,18 +934,27 @@ pub fn save_node_versions(indices: &[usize]) -> Result<Value, (String, String)> 
 
     if !dupes.is_empty() {
         let list = dupes.join(", ");
-        return Err(("duplicate_versions".into(), format!("Versões duplicadas: {list}. Cada versão deve ter apenas um path.")));
+        return Err((
+            "duplicate_versions".into(),
+            format!("Versões duplicadas: {list}. Cada versão deve ter apenas um path."),
+        ));
     }
 
     if selected.is_empty() {
-        return Err(("no_selection".into(), "Nenhuma versão válida selecionada.".into()));
+        return Err((
+            "no_selection".into(),
+            "Nenhuma versão válida selecionada.".into(),
+        ));
     }
 
     // Escrever arquivo
     let etc_dir = Path::new(crate::state::PLUGIN_PATH).join("etc");
     if !etc_dir.is_dir() {
         std::fs::create_dir_all(&etc_dir).map_err(|e| {
-            ("write_failed".into(), format!("Erro ao criar {}: {e}", etc_dir.display()))
+            (
+                "write_failed".into(),
+                format!("Erro ao criar {}: {e}", etc_dir.display()),
+            )
         })?;
     }
     // etc/ deve ser 755 — CGI admin roda como o admin logado, não como diradmin
@@ -912,11 +963,16 @@ pub fn save_node_versions(indices: &[usize]) -> Result<Value, (String, String)> 
     let nv_file = etc_dir.join("node_versions");
     let content = selected.join("\n") + "\n";
     std::fs::write(&nv_file, content.as_bytes()).map_err(|e| {
-        ("write_failed".into(), format!("Erro ao gravar {}: {e}", nv_file.display()))
+        (
+            "write_failed".into(),
+            format!("Erro ao gravar {}: {e}", nv_file.display()),
+        )
     })?;
     let _ = std::fs::set_permissions(&nv_file, std::fs::Permissions::from_mode(0o644));
 
-    Ok(json!({"message": "Versões salvas.", "saved": selected.len(), "file": nv_file.to_string_lossy()}))
+    Ok(
+        json!({"message": "Versões salvas.", "saved": selected.len(), "file": nv_file.to_string_lossy()}),
+    )
 }
 
 /// Versão mínima do Node.js suportada (--import requer 20.6+)
@@ -936,7 +992,9 @@ fn parse_node_semver(ver: &str) -> Option<(u32, u32, u32)> {
 /// Retorna true se a versão atende ao mínimo exigido
 fn node_version_ok(ver: &str) -> bool {
     match parse_node_semver(ver) {
-        Some((major, minor, _)) => major > NODE_MIN_MAJOR || (major == NODE_MIN_MAJOR && minor >= NODE_MIN_MINOR),
+        Some((major, minor, _)) => {
+            major > NODE_MIN_MAJOR || (major == NODE_MIN_MAJOR && minor >= NODE_MIN_MINOR)
+        }
         None => false,
     }
 }
@@ -951,13 +1009,21 @@ fn get_node_version_raw(path: &Path) -> Option<String> {
         return None;
     }
     let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if ver.starts_with('v') { Some(ver) } else { None }
+    if ver.starts_with('v') {
+        Some(ver)
+    } else {
+        None
+    }
 }
 
 /// Roda `{path} --version` e retorna a saída somente se >= mínimo suportado.
 fn get_node_version(path: &Path) -> Option<String> {
     let ver = get_node_version_raw(path)?;
-    if node_version_ok(&ver) { Some(ver) } else { None }
+    if node_version_ok(&ver) {
+        Some(ver)
+    } else {
+        None
+    }
 }
 
 /// Glob simples para paths com *
