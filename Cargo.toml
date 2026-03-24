@@ -1,0 +1,29 @@
+[package]
+name = "core-selynt"
+version = "1.0.0"
+edition = "2024"
+authors = ["NullSablex <https://github.com/NullSablex>"]
+description = "Selynt Panel — gerenciador de processos setuid root para servidores DirectAdmin"
+repository = "https://github.com/NullSablex/core-selynt"
+license = "AGPL-3.0-or-later"
+keywords = ["process-manager", "directadmin", "selynt"]
+
+[[bin]]
+name = "core-selynt"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+clap = { version = "4.6.0", features = ["derive"] }
+nix = { version = "0.31.2", features = ["signal", "process", "user", "fs"] }
+libc = "0.2.183"
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

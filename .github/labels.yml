@@ -1,0 +1,47 @@
+- name: bug
+  color: d73a4a
+  description: Algo não está funcionando corretamente
+
+- name: enhancement
+  color: a2eeef
+  description: Nova funcionalidade ou melhoria
+
+- name: documentation
+  color: 0075ca
+  description: Melhorias ou correções na documentação
+
+- name: security
+  color: e11d48
+  description: Relacionado a segurança ou privilégios
+
+- name: breaking-change
+  color: b60205
+  description: Mudança que quebra compatibilidade com versões anteriores
+
+- name: ci
+  color: f9d0c4
+  description: Mudanças em workflows e configuração de CI/CD
+
+- name: core
+  color: 6e40c9
+  description: Mudanças no código-fonte principal (src/)
+
+- name: dependencies
+  color: 0366d6
+  description: Atualização de dependências
+
+- name: duplicate
+  color: cfd3d7
+  description: Esta issue ou PR já existe
+
+- name: wontfix
+  color: ffffff
+  description: Não será corrigido ou implementado
+
+- name: good first issue
+  color: 7057ff
+  description: Boa para quem está contribuindo pela primeira vez
+
+- name: help wanted
+  color: 008672
+  description: Contribuições são bem-vindas

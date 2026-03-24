@@ -1,0 +1,19 @@
+core:
+  - changed-files:
+    - any-glob-to-any-file: "src/**"
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file: ".github/**"
+
+docs:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "README.md"
+      - "CHANGELOG.md"
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "Cargo.toml"
+      - "Cargo.lock"

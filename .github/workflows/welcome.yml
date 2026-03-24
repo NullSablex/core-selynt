@@ -1,0 +1,39 @@
+name: Welcome
+
+on:
+  pull_request_target:
+    types: [opened]
+  issues:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  welcome:
+    name: Welcome new contributor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: |
+            Olá! Obrigado por abrir esta issue. 👋
+
+            Antes de prosseguir, certifique-se de que:
+            - A issue descreve claramente o problema ou sugestão
+            - Você incluiu passos para reproduzir (se for um bug)
+            - Não existe outra issue aberta com o mesmo assunto
+
+            Agradecemos sua contribuição ao **Core Selynt**!
+          pr-message: |
+            Olá! Obrigado por enviar este Pull Request. 👋
+
+            Antes de revisarmos, verifique se:
+            - O código compila sem erros (`cargo check`)
+            - `cargo fmt` e `cargo clippy` passam sem avisos
+            - O binário foi testado com o target `x86_64-unknown-linux-musl`
+            - O CHANGELOG foi atualizado se necessário
+
+            Agradecemos sua contribuição ao **Core Selynt**!
