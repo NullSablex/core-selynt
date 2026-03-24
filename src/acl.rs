@@ -72,8 +72,6 @@ fn fallback_chmod(
     for dir in &[state_dir, s_dir, p_dir] {
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711));
     }
-    let _ =
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
-    let _ =
-        std::fs::set_permissions(marker_path, std::fs::Permissions::from_mode(0o604));
+    let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
+    let _ = std::fs::set_permissions(marker_path, std::fs::Permissions::from_mode(0o604));
 }

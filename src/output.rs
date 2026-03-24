@@ -14,13 +14,19 @@ pub fn success(extra: Value) -> ! {
 
 /// Erro de usuário (input inválido, app não existe, estado incorreto) → exit 1
 pub fn user_error(error: &str, message: &str) -> ! {
-    println!("{}", json!({"ok": false, "error": error, "message": message}));
+    println!(
+        "{}",
+        json!({"ok": false, "error": error, "message": message})
+    );
     process::exit(1);
 }
 
 /// Erro de sistema (filesystem, permissão, processo, socket) → exit 2
 pub fn system_error(error: &str, message: &str) -> ! {
-    println!("{}", json!({"ok": false, "error": error, "message": message}));
+    println!(
+        "{}",
+        json!({"ok": false, "error": error, "message": message})
+    );
     process::exit(2);
 }
 
