@@ -5,6 +5,18 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) · Versiona
 
 ---
 
+## [1.1.0] — 2026-03-29
+
+### Adicionado
+
+**Detecção adaptativa de readiness do socket Unix**
+- Substituídos timeouts fixos por detecção de progresso via `/proc/{pid}/stat` (CPU ticks) e `/proc/{pid}/status` (VmRSS)
+- Processo encerrado apenas quando não apresenta delta de CPU nem de RSS por 4 checks consecutivos de 2.5s (10s de inatividade confirmada) — erro `socket_stuck`
+- Teto absoluto de 120s mantido como fallback de segurança
+- Novos helpers em `proc.rs`: `read_proc_cpu_ticks`, `read_proc_rss_kb`, `ProcessSnapshot`, `read_proc_snapshot`
+
+---
+
 ## [1.0.0] — 2026-03-24
 
 Versão inicial de produção.

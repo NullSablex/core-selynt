@@ -10,10 +10,28 @@ use serde_json::{Value, json};
 
 use crate::acl::apply_acl;
 use crate::output::{debug, success, system_error, user_error};
-use crate::proc::{has_network_listen, is_process_alive, read_proc_starttime, read_proc_uid};
+use crate::proc::{
+    has_network_listen, is_process_alive, read_proc_snapshot, read_proc_starttime, read_proc_uid,
+};
 use crate::state::{
     AppMeta, atomic_write, list_app_names, load_app_meta, parse_kv, set_perm, validate_name,
 };
+
+// ─── Constantes de readiness adaptativo ──────────────────────────────────────
+
+/// Teto absoluto para criação do socket (ambos os tipos de app).
+const SOCKET_HARD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Intervalo entre snapshots de progresso. 2.5s absorve jitter de scheduling e
+/// pausas de GC do Node sem falsos positivos.
+const PROGRESS_CHECK_INTERVAL: Duration = Duration::from_millis(2500);
+
+/// Checks consecutivos com zero delta de CPU E RSS para declarar travamento.
+/// 4 × 2.5s = 10s de inatividade confirmada antes de SIGKILL.
+const STUCK_THRESHOLD: u32 = 4;
+
+/// Teto para a fase de aceitar conexões (socket já existe).
+const SOCKET_ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ─── Helper de debug ──────────────────────────────────────────────────────────
 
@@ -405,25 +423,23 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
         system_error("state_write_failed", &format!("{e:#}"));
     }
 
-    // 5. Aguardar socket Unix aparecer e estar funcional
-    let socket_timeout = if meta.app_type == "rust" {
-        Duration::from_secs(5)
-    } else {
-        Duration::from_secs(10)
-    };
+    // 5. Aguardar socket Unix aparecer (detecção adaptativa de progresso)
+    let hard_deadline = Instant::now() + SOCKET_HARD_TIMEOUT;
+    let mut last_progress_check = Instant::now();
+    let mut last_snapshot = read_proc_snapshot(pid);
+    let mut stuck_count: u32 = 0;
 
-    let t0 = Instant::now();
     loop {
         if socket_path.exists() {
             break;
         }
-        if t0.elapsed() > socket_timeout {
+        if Instant::now() >= hard_deadline {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
             let _ = std::fs::remove_file(&pid_file);
             let _ = std::fs::remove_file(&meta_file);
             system_error(
                 "socket_timeout",
-                "processo não criou o socket Unix no tempo esperado",
+                "processo não criou o socket Unix no tempo esperado (120s)",
             );
         }
         if !is_process_alive(pid) {
@@ -434,12 +450,44 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
                 "processo encerrou antes de criar o socket",
             );
         }
+        if last_progress_check.elapsed() >= PROGRESS_CHECK_INTERVAL {
+            last_progress_check = Instant::now();
+            let current = read_proc_snapshot(pid);
+            let made_progress = match (last_snapshot, current) {
+                (Some(prev), Some(cur)) => {
+                    cur.cpu_ticks > prev.cpu_ticks || cur.rss_kb > prev.rss_kb
+                }
+                _ => true,
+            };
+            if made_progress {
+                stuck_count = 0;
+            } else {
+                stuck_count += 1;
+                debug(format!(
+                    "pid={pid} sem progresso: {stuck_count}/{STUCK_THRESHOLD}"
+                ));
+            }
+            last_snapshot = current;
+            if stuck_count >= STUCK_THRESHOLD {
+                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                let _ = std::fs::remove_file(&pid_file);
+                let _ = std::fs::remove_file(&meta_file);
+                system_error(
+                    "socket_stuck",
+                    "processo parou de fazer progresso antes de criar o socket Unix",
+                );
+            }
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // 5b. Verificar se o socket aceita conexões
-    let connect_deadline = Instant::now() + Duration::from_secs(3);
+    // 5b. Verificar se o socket aceita conexões (detecção adaptativa de progresso)
+    let connect_deadline = Instant::now() + SOCKET_ACCEPT_TIMEOUT;
     let mut socket_ok = false;
+    let mut last_accept_check = Instant::now();
+    let mut last_accept_snapshot = read_proc_snapshot(pid);
+    let mut accept_stuck_count: u32 = 0;
+
     while Instant::now() < connect_deadline {
         match std::os::unix::net::UnixStream::connect(&socket_path) {
             Ok(_) => {
@@ -455,6 +503,32 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
                         "process_exited",
                         "processo encerrou antes de aceitar conexões no socket",
                     );
+                }
+                if last_accept_check.elapsed() >= PROGRESS_CHECK_INTERVAL {
+                    last_accept_check = Instant::now();
+                    let current = read_proc_snapshot(pid);
+                    let made_progress = match (last_accept_snapshot, current) {
+                        (Some(prev), Some(cur)) => {
+                            cur.cpu_ticks > prev.cpu_ticks || cur.rss_kb > prev.rss_kb
+                        }
+                        _ => true,
+                    };
+                    if made_progress {
+                        accept_stuck_count = 0;
+                    } else {
+                        accept_stuck_count += 1;
+                    }
+                    last_accept_snapshot = current;
+                    if accept_stuck_count >= STUCK_THRESHOLD {
+                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                        let _ = std::fs::remove_file(&pid_file);
+                        let _ = std::fs::remove_file(&meta_file);
+                        let _ = std::fs::remove_file(&socket_path);
+                        system_error(
+                            "socket_stuck",
+                            "processo parou de fazer progresso antes de aceitar conexões no socket",
+                        );
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }

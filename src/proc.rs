@@ -31,6 +31,42 @@ pub fn is_process_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// Lê utime + stime de /proc/{pid}/stat (ticks de CPU consumidos pelo processo).
+pub fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
+    let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_paren = content.rfind(')')?;
+    let rest = &content[after_paren + 2..];
+    let mut it = rest.split_whitespace();
+    let utime: u64 = it.nth(11)?.parse().ok()?;
+    let stime: u64 = it.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
+/// Lê VmRSS (KB) de /proc/{pid}/status.
+pub fn read_proc_rss_kb(pid: u32) -> Option<u64> {
+    let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Snapshot de métricas de progresso de um processo.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessSnapshot {
+    pub cpu_ticks: u64,
+    pub rss_kb: u64,
+}
+
+/// Lê um snapshot de progresso do processo. Retorna None se o processo não existe.
+pub fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+    let cpu_ticks = read_proc_cpu_ticks(pid)?;
+    let rss_kb = read_proc_rss_kb(pid).unwrap_or_default();
+    Some(ProcessSnapshot { cpu_ticks, rss_kb })
+}
+
 /// Verifica se o processo abriu portas de rede (TCP ou UDP).
 ///
 /// Algoritmo:
