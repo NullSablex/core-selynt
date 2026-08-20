@@ -1,69 +1,85 @@
 # Changelog
 
-Todas as mudanças notáveis neste projeto são documentadas aqui.
-Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) · Versionamento: [SemVer](https://semver.org/lang/pt-BR/).
+All notable changes to this project are documented here.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
+
+---
+
+## [Unreleased]
+
+### Fixed
+
+**`remove` apagava o `.env` mesmo sem `--delete-dir` (#3)**
+- Com o diretório preservado, apenas os logs do app são removidos; `.env` e demais arquivos do usuário permanecem intactos
+
+### Added
+
+**`set-node-version` (#3)**
+- Permite trocar o runtime Node.js de um app já registrado sem recriá-lo
+- A resposta traz `restart_required: true` quando o app está em execução
+- Valores de metadados (`cwd`, `domain`, `subdomain`, `node_version`) passam a rejeitar quebras de linha e bytes nulos, que forjariam chaves no arquivo `.app`
 
 ---
 
 ## [1.1.0] — 2026-03-29
 
-### Adicionado
+### Added
 
-**Detecção adaptativa de readiness do socket Unix**
-- Substituídos timeouts fixos por detecção de progresso via `/proc/{pid}/stat` (CPU ticks) e `/proc/{pid}/status` (VmRSS)
-- Processo encerrado apenas quando não apresenta delta de CPU nem de RSS por 4 checks consecutivos de 2.5s (10s de inatividade confirmada) — erro `socket_stuck`
-- Teto absoluto de 120s mantido como fallback de segurança
-- Novos helpers em `proc.rs`: `read_proc_cpu_ticks`, `read_proc_rss_kb`, `ProcessSnapshot`, `read_proc_snapshot`
+**Adaptive readiness detection for Unix sockets**
+- Replaced fixed timeouts with progress detection via `/proc/{pid}/stat` (CPU ticks) and `/proc/{pid}/status` (VmRSS)
+- Process is terminated only when it shows no CPU or RSS delta over 4 consecutive checks of 2.5s (10s of confirmed inactivity) — `socket_stuck` error
+- Absolute ceiling of 120s kept as a safety fallback
+- New helpers in `proc.rs`: `read_proc_cpu_ticks`, `read_proc_rss_kb`, `ProcessSnapshot`, `read_proc_snapshot`
 
 ---
 
 ## [1.0.0] — 2026-03-24
 
-Versão inicial de produção.
+Initial production release.
 
-### Adicionado
+### Added
 
-**CLI e comandos**
-- Subcomandos: `list`, `status`, `start`, `stop`, `restart`, `add`, `remove`, `logs`, `domains`
-- Grupo `admin`: `version`, `list`, `detect-nodes`, `save-node-versions`
-- Flag global `--debug` — adiciona `_debug` ao JSON de saída
-- Variável `SELYNT_DEBUG=1` — ativa logs de diagnóstico em stderr
+**CLI and commands**
+- Subcommands: `list`, `status`, `start`, `stop`, `restart`, `add`, `remove`, `logs`, `domains`
+- `admin` group: `version`, `list`, `detect-nodes`, `save-node-versions`
+- Global `--debug` flag — adds `_debug` to the JSON output
+- `SELYNT_DEBUG=1` environment variable — enables diagnostic logs on stderr
 
-**Gerenciamento de processos**
-- Suporte a múltiplos tipos de app com comportamento específico por tipo no `start` e no `add`
-- Processos spawnados com `setsid()` via `pre_exec` — cada app é líder de nova sessão
-- `stop`: SIGTERM → poll de 200 ms → SIGKILL após timeout (padrão 10 s, configurável via `--timeout`)
-- `restart`: stop + start sequencial
-- Detecção de readiness por socket Unix: aguarda criação e aceita conexão antes de retornar sucesso
-- Timeout de socket configurável por tipo de app
-- Bloqueio de portas de rede: app que abrir TCP/UDP é encerrado com `network_port_forbidden`
-- Detecção de runtimes instalados via `admin detect-nodes` com suporte a paths fixos, NVM, CloudLinux (`opt/alt`) e `NVM_DIR`
-- Persistência de runtimes selecionados em `{plugin}/etc/node_versions`
+**Process management**
+- Support for multiple app types with type-specific behavior in `start` and `add`
+- Processes spawned with `setsid()` via `pre_exec` — each app becomes the leader of a new session
+- `stop`: SIGTERM → 200 ms poll → SIGKILL after timeout (default 10s, configurable via `--timeout`)
+- `restart`: sequential stop + start
+- Unix socket readiness detection: waits for creation and accepts a connection before returning success
+- Per-type configurable socket timeout
+- Network port blocking: any app opening TCP/UDP is terminated with `network_port_forbidden`
+- Detection of installed runtimes via `admin detect-nodes` with support for fixed paths, NVM, CloudLinux (`opt/alt`) and `NVM_DIR`
+- Selected runtimes persisted to `{plugin}/etc/node_versions`
 
-**Segurança e privilégio**
-- Binário setuid root; exige `euid=0` na entrada
-- Drop de privilégio: `initgroups` + `setgid` + `setuid` + `prctl(PR_SET_NO_NEW_PRIVS)` antes de executar comandos
-- Anti PID-reuse: PID validado contra `starttime` de `/proc/{pid}/stat`
-- Validação de UID do processo via `/proc/{pid}/status`
-- Validação de path traversal em `name`, `entry` e `host` (`..`, `/`, bytes nulos)
-- Criação atômica de `.app` via `create_new` (previne TOCTOU)
-- ACL no socket Unix e no marker de proxy via `setfacl`; fallback para `chmod` (711/600/604)
+**Security and privilege**
+- Setuid root binary; requires `euid=0` at entry
+- Privilege drop: `initgroups` + `setgid` + `setuid` + `prctl(PR_SET_NO_NEW_PRIVS)` before executing commands
+- Anti PID-reuse: PID validated against `starttime` from `/proc/{pid}/stat`
+- Process UID validation via `/proc/{pid}/status`
+- Path traversal validation on `name`, `entry` and `host` (`..`, `/`, null bytes)
+- Atomic `.app` creation via `create_new` (prevents TOCTOU)
+- ACL on Unix socket and proxy marker via `setfacl`; fallback to `chmod` (711/600/604)
 
-**Estado e logs**
-- State dir em `/var/lib/selynt_panel/{user}/` com subdirs `.run/`, `.sockets/`, `.proxy/`
-- Escrita atômica de arquivos de estado (write `.tmp` + rename)
-- Variáveis de ambiente lidas do `.env` no cwd do app no momento do start
-- Log rotation automática: arquivos > 50 MB são truncados mantendo 5.000 linhas
-- Leitura de log por tail reverso em chunks de 8 KB (sem carregar o arquivo inteiro)
+**State and logs**
+- State dir at `/var/lib/selynt_panel/{user}/` with subdirs `.run/`, `.sockets/`, `.proxy/`
+- Atomic state file writes (write `.tmp` + rename)
+- Environment variables read from `.env` in the app's cwd at start time
+- Automatic log rotation: files larger than 50 MB are truncated keeping the last 5,000 lines
+- Log reading via reverse tail in 8 KB chunks (does not load the whole file)
 
-**Integração DirectAdmin**
-- Leitura de `domains.list` e `{domain}.subdomains` como root antes do drop de privilégio
-- Comunicação com o daemon DA via HTTP/1.0 sobre Unix socket (`da.rs`)
-- Suporte a `COOKIESTRING`, `HTTP_COOKIE` e `SESSION` para autenticação CGI
-- `admin list` coleta dados de todos os usuários em `/var/lib/selynt_panel/` como root
+**DirectAdmin integration**
+- Reads `domains.list` and `{domain}.subdomains` as root before the privilege drop
+- Communicates with the DA daemon over HTTP/1.0 on a Unix socket (`da.rs`)
+- Supports `COOKIESTRING`, `HTTP_COOKIE` and `SESSION` for CGI authentication
+- `admin list` collects data from all users in `/var/lib/selynt_panel/` as root
 
 ---
 
 ## Copyright
 
-Copyright © 2026 [NullSablex](https://github.com/NullSablex). Licenciado sob a [GNU AGPL-3.0-or-later](LICENSE).
+Copyright © 2026 [NullSablex](https://github.com/NullSablex). Licensed under [GNU AGPL-3.0-or-later](LICENSE).

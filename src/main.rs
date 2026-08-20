@@ -7,23 +7,24 @@ mod state;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use output::system_error;
 use state::{
     drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user,
 };
 
-// ─── CLI ──────────────────────────────────────────────────────────────────────
+const STATE_BASE: &str = "/var/lib/selynt_panel";
+const DA_USERS_BASE: &str = "/usr/local/directadmin/data/users";
 
 #[derive(Parser)]
 #[command(
     name = "core_selynt",
     version,
-    about = "Selynt Panel — gerenciador de processos"
+    about = "Selynt Panel — process manager"
 )]
 struct Cli {
-    /// Ativa modo debug: inclui _debug no JSON de saída
+    /// Enable debug mode: adds `_debug` to the JSON output.
     #[arg(long, global = true)]
     debug: bool,
 
@@ -33,27 +34,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Lista todos os apps registrados
+    /// Lists every registered app.
     List,
 
-    /// Mostra o status de um app
+    /// Shows status (RUNNING/STOPPED) and PID of an app.
     Status { name: String },
 
-    /// Inicia um app
+    /// Starts an app.
     Start { name: String },
 
-    /// Para um app
+    /// Stops an app.
     Stop {
         name: String,
-        /// Segundos de espera antes de SIGKILL (padrão: 10)
+        /// Seconds to wait before SIGKILL (default: 10).
         #[arg(long, default_value_t = 10)]
         timeout: u64,
     },
 
-    /// Reinicia um app (stop + start)
+    /// Restarts an app (stop + start).
     Restart { name: String },
 
-    /// Registra um novo app
+    /// Registers a new app.
     Add {
         name: String,
         #[arg(long = "type", value_enum)]
@@ -68,41 +69,55 @@ enum Commands {
         domain: Option<String>,
         #[arg(long)]
         subdomain: Option<String>,
-        /// Path do binário Node.js (ex: /usr/local/bin/node)
+        /// Path to a `node` binary (e.g. `/usr/local/bin/node`). Uses `PATH` if omitted.
         #[arg(long)]
         node_version: Option<String>,
-        /// Variáveis de ambiente no formato KEY=VAL (repetível)
+        /// Environment variable, in `KEY=VAL` form (repeatable).
         #[arg(long = "env", value_name = "KEY=VAL")]
         env_vars: Vec<String>,
     },
 
-    /// Remove um app (para se estiver rodando)
+    /// Removes an app (stops it first if running).
     Remove {
         name: String,
-        /// Apaga também o diretório cwd do app
+        /// Also delete the app's `cwd` directory.
         #[arg(long)]
         delete_dir: bool,
     },
 
-    /// Exibe as últimas linhas do log de um app
+    /// Updates the Node.js runtime path of an existing app.
+    SetNodeVersion {
+        name: String,
+        /// Path to a `node` binary (e.g. `/usr/local/bin/node`).
+        #[arg(long)]
+        node_version: String,
+    },
+
+    /// Prints the last lines of an app's log.
     Logs {
         name: String,
-        /// Quantidade de linhas (padrão: 100)
+        /// Number of lines to read (default: 100).
         #[arg(long, default_value_t = 100)]
         lines: usize,
-        /// Ler stderr em vez de stdout
+        /// Read stderr instead of stdout.
         #[arg(long)]
         stderr: bool,
     },
 
-    /// Lista domínios e subdomínios do usuário (lê arquivos DA como root)
+    /// Lists the user's domains and subdomains (reads DA data files as root).
     Domains {
-        /// Filtrar por domínio específico
+        /// Filter by a specific domain.
         #[arg(long)]
         domain: Option<String>,
     },
 
-    /// Comandos administrativos (executar como diradmin)
+    /// Persists the current user's own panel-language preference.
+    SetLocale {
+        /// Locale code (e.g. `pt-br`, `en`). Empty clears the preference.
+        locale: String,
+    },
+
+    /// Administrative commands (requires `diradmin`).
     Admin {
         #[command(subcommand)]
         command: AdminCommands,
@@ -111,16 +126,18 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AdminCommands {
-    /// Retorna a versão do binário
+    /// Returns the binary version.
     Version,
-    /// Lista todos os apps de todos os usuários
+    /// Lists apps from every user.
     List,
-    /// Detecta versões do Node.js instaladas no sistema
+    /// Detects Node.js runtimes installed on the system.
     DetectNodes,
-    /// Salva versões do Node.js selecionadas (por índice da detecção)
-    SaveNodeVersions {
-        /// Índices das versões a salvar
-        indices: Vec<usize>,
+    /// Persists the Node.js runtimes selected by detection index.
+    SaveNodeVersions { indices: Vec<usize> },
+    /// Persists the plugin-wide default panel language.
+    SetLocale {
+        /// Locale code (e.g. `pt-br`, `en`). Empty clears the default.
+        locale: String,
     },
 }
 
@@ -131,57 +148,83 @@ enum AppType {
 }
 
 impl AppType {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match self {
-            AppType::Node => "node",
-            AppType::Rust => "rust",
+            Self::Node => "node",
+            Self::Rust => "rust",
         }
     }
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
-
 fn main() {
     let cli = Cli::parse();
 
-    // Requer euid=0 — o binário deve ser setuid root
     if !nix::unistd::geteuid().is_root() {
-        system_error("root_required", "core_selynt deve ser setuid root (euid=0)");
+        system_error("root_required", "core_selynt must be setuid root (euid=0)");
     }
 
-    // Resolver user real a partir de USERNAME env
     let (uid, gid, home, username) = match resolve_target_user() {
         Ok(u) => u,
         Err(e) => system_error("user_resolve_failed", &format!("{e:#}")),
     };
 
-    // Resolver state_dir: SELYNT_STATE_DIR tem precedência, mas deve estar sob /var/lib/selynt_panel/
-    let state_dir = PathBuf::from(
-        std::env::var("SELYNT_STATE_DIR")
-            .ok()
-            .filter(|p| p.starts_with("/var/lib/selynt_panel/") && !p.contains(".."))
-            .unwrap_or_else(|| format!("/var/lib/selynt_panel/{username}")),
-    );
+    let state_dir = resolve_state_dir(&username);
 
-    // [ROOT] Criar state_dir + subdirs, chown para o user real
     if let Err(e) = init_state_dir(&state_dir, uid, gid) {
         system_error(
             "init_failed",
-            &format!("{e:#} (uid={uid}, state_dir={state_dir:?})"),
+            &format!("{e:#} (uid={uid}, state_dir={})", state_dir.display()),
         );
     }
 
-    // [ROOT] Para domains: ler arquivos DA antes do drop (owned por diradmin)
-    let domains_data: Vec<(String, Vec<String>)> =
-        if let Commands::Domains { ref domain } = cli.command {
-            read_domains_files(&username, domain.as_deref())
-        } else {
-            Vec::new()
-        };
+    let prelude = run_root_prelude(&cli.command, &username, &state_dir, uid, gid);
+    let web_user = state::get_web_user();
 
-    // [ROOT] Para start: criar {cwd}/logs/ com ownership do user real
-    if let Commands::Start { name } = &cli.command
-        && let Ok(meta) = load_app_meta(&state_dir, name)
+    if let Err(e) = drop_privileges(uid, gid, &username) {
+        system_error("privilege_drop_failed", &format!("{e:#}"));
+    }
+
+    output::debug(format!("state_dir={}", state_dir.display()));
+
+    let dbg = build_debug_base(cli.debug, &username, &home, Some(&state_dir));
+    dispatch(cli.command, &state_dir, &web_user, prelude, dbg.as_ref())
+}
+
+/// Resolves the state dir for `username`. Honours `SELYNT_STATE_DIR` only when
+/// it falls under `/var/lib/selynt_panel/` and contains no `..` traversal.
+fn resolve_state_dir(username: &str) -> PathBuf {
+    PathBuf::from(
+        std::env::var("SELYNT_STATE_DIR")
+            .ok()
+            .filter(|p| p.starts_with(&format!("{STATE_BASE}/")) && !p.contains(".."))
+            .unwrap_or_else(|| format!("{STATE_BASE}/{username}")),
+    )
+}
+
+/// Data that has to be collected as root, before the privilege drop, because
+/// the files involved are owned by `diradmin` or live in directories the real
+/// user cannot traverse.
+struct RootPrelude {
+    domains: Vec<(String, Vec<String>)>,
+    admin_apps: Vec<serde_json::Value>,
+    save_node_versions: Option<Result<serde_json::Value, (String, String)>>,
+    set_locale: Option<Result<serde_json::Value, (String, String)>>,
+}
+
+fn run_root_prelude(
+    command: &Commands,
+    username: &str,
+    state_dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> RootPrelude {
+    let domains = match command {
+        Commands::Domains { domain } => read_domains_files(username, domain.as_deref()),
+        _ => Vec::new(),
+    };
+
+    if let Commands::Start { name } = command
+        && let Ok(meta) = load_app_meta(state_dir, name)
     {
         let cwd = PathBuf::from(&meta.cwd);
         if let Err(e) = init_app_logs_dir(&cwd, uid, gid) {
@@ -189,9 +232,8 @@ fn main() {
         }
     }
 
-    // [ROOT] Para admin list: ler dados de todos os users antes do drop
     let admin_apps = if matches!(
-        cli.command,
+        command,
         Commands::Admin {
             command: AdminCommands::List
         }
@@ -201,39 +243,48 @@ fn main() {
         Vec::new()
     };
 
-    // [ROOT] Para admin save-node-versions: detectar + salvar antes do drop
-    let save_nv_result = if let Commands::Admin {
-        command: AdminCommands::SaveNodeVersions { ref indices },
-    } = cli.command
+    let save_node_versions = if let Commands::Admin {
+        command: AdminCommands::SaveNodeVersions { indices },
+    } = command
     {
         Some(cmd::save_node_versions(indices))
     } else {
         None
     };
 
-    // [ROOT] Ler web_user ANTES do drop (etc/ do plugin é owned por diradmin)
-    let web_user = state::get_web_user();
+    // Locale writes must happen as root: the state dir is owned by `diradmin`
+    // (711) and the panel CGI runs as the web user, which cannot write there.
+    let set_locale = match command {
+        Commands::SetLocale { locale } => {
+            Some(cmd::set_locale_user(state_dir, locale, uid, gid))
+        }
+        Commands::Admin {
+            command: AdminCommands::SetLocale { locale },
+        } => Some(cmd::set_locale_global(locale)),
+        _ => None,
+    };
 
-    // DROP de privilégio: a partir daqui roda como o user real
-    if let Err(e) = drop_privileges(uid, gid, &username) {
-        system_error("privilege_drop_failed", &format!("{e:#}"));
+    RootPrelude {
+        domains,
+        admin_apps,
+        save_node_versions,
+        set_locale,
     }
+}
 
-    output::debug(format!("state_dir={:?}", state_dir));
-
-    let dbg = build_debug_base(cli.debug, &username, &home, Some(&state_dir));
-
-    match cli.command {
-        Commands::List => cmd::cmd_list(&state_dir, dbg.as_ref()),
-
-        Commands::Status { name } => cmd::cmd_status(&state_dir, &name, dbg.as_ref()),
-
-        Commands::Start { name } => cmd::cmd_start(&state_dir, &name, &web_user, dbg.as_ref()),
-
-        Commands::Stop { name, timeout } => cmd::cmd_stop(&state_dir, &name, timeout, dbg.as_ref()),
-
-        Commands::Restart { name } => cmd::cmd_restart(&state_dir, &name, &web_user, dbg.as_ref()),
-
+fn dispatch(
+    command: Commands,
+    state_dir: &Path,
+    web_user: &str,
+    prelude: RootPrelude,
+    dbg: Option<&serde_json::Value>,
+) -> ! {
+    match command {
+        Commands::List => cmd::cmd_list(state_dir, dbg),
+        Commands::Status { name } => cmd::cmd_status(state_dir, &name, dbg),
+        Commands::Start { name } => cmd::cmd_start(state_dir, &name, web_user, dbg),
+        Commands::Stop { name, timeout } => cmd::cmd_stop(state_dir, &name, timeout, dbg),
+        Commands::Restart { name } => cmd::cmd_restart(state_dir, &name, web_user, dbg),
         Commands::Add {
             name,
             app_type,
@@ -245,31 +296,35 @@ fn main() {
             node_version,
             env_vars,
         } => cmd::cmd_add(
-            &state_dir,
-            &name,
-            app_type.as_str(),
-            cwd.as_deref(),
-            &entry,
-            &host,
-            domain.as_deref(),
-            subdomain.as_deref(),
-            node_version.as_deref(),
-            &env_vars,
-            dbg.as_ref(),
+            state_dir,
+            &cmd::AddArgs {
+                name: &name,
+                app_type: app_type.as_str(),
+                cwd: cwd.as_deref(),
+                entry: &entry,
+                host: &host,
+                domain: domain.as_deref(),
+                subdomain: subdomain.as_deref(),
+                node_version: node_version.as_deref(),
+                env_vars: &env_vars,
+            },
+            dbg,
         ),
-
-        Commands::Remove { name, delete_dir } => {
-            cmd::cmd_remove(&state_dir, &name, delete_dir, dbg.as_ref())
+        Commands::Remove { name, delete_dir } => cmd::cmd_remove(state_dir, &name, delete_dir, dbg),
+        Commands::SetNodeVersion { name, node_version } => {
+            cmd::cmd_set_node_version(state_dir, &name, &node_version, dbg)
         }
-
         Commands::Logs {
             name,
             lines,
             stderr,
-        } => cmd::cmd_logs(&state_dir, &name, lines, stderr, dbg.as_ref()),
-
-        Commands::Domains { .. } => cmd::cmd_domains(domains_data, dbg.as_ref()),
-
+        } => cmd::cmd_logs(state_dir, &name, lines, stderr, dbg),
+        Commands::Domains { .. } => cmd::cmd_domains(prelude.domains, dbg),
+        Commands::SetLocale { .. } => emit_prelude_result(
+            prelude.set_locale,
+            "set_locale result missing for SetLocale",
+            dbg,
+        ),
         Commands::Admin {
             command: AdminCommands::Version,
         } => {
@@ -279,40 +334,58 @@ fn main() {
             );
             std::process::exit(0);
         }
-
         Commands::Admin {
             command: AdminCommands::List,
-        } => cmd::cmd_admin_list(admin_apps, dbg.as_ref()),
-
+        } => cmd::cmd_admin_list(&prelude.admin_apps, dbg),
         Commands::Admin {
             command: AdminCommands::DetectNodes,
-        } => cmd::cmd_admin_detect_nodes(dbg.as_ref()),
-
+        } => cmd::cmd_admin_detect_nodes(dbg),
         Commands::Admin {
             command: AdminCommands::SaveNodeVersions { .. },
-        } => match save_nv_result.unwrap() {
-            Ok(val) => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("ok".into(), json!(true));
-                if let serde_json::Value::Object(map) = val {
-                    obj.extend(map);
-                }
-                if let Some(d) = dbg.as_ref() {
-                    obj.insert("_debug".into(), d.clone());
-                }
-                println!("{}", serde_json::Value::Object(obj));
-                std::process::exit(0);
-            }
-            Err((error, message)) => output::user_error(&error, &message),
-        },
+        } => emit_prelude_result(
+            prelude.save_node_versions,
+            "save_node_versions result missing for SaveNodeVersions",
+            dbg,
+        ),
+        Commands::Admin {
+            command: AdminCommands::SetLocale { .. },
+        } => emit_prelude_result(
+            prelude.set_locale,
+            "set_locale result missing for Admin::SetLocale",
+            dbg,
+        ),
     }
 }
 
-/// Lê domínios e subdomínios dos arquivos DA como root.
-/// `/usr/local/directadmin/data/users/{user}/domains.list`
-/// `/usr/local/directadmin/data/users/{user}/domains/{domain}.subdomains`
+/// Emits a JSON result computed in the root prelude. `run_root_prelude`
+/// populates `result` for the matching command, so `None` is a programming bug.
+fn emit_prelude_result(
+    result: Option<Result<serde_json::Value, (String, String)>>,
+    missing_msg: &str,
+    dbg: Option<&serde_json::Value>,
+) -> ! {
+    let outcome = result.expect(missing_msg);
+    match outcome {
+        Ok(val) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("ok".into(), json!(true));
+            if let serde_json::Value::Object(map) = val {
+                obj.extend(map);
+            }
+            if let Some(d) = dbg {
+                obj.insert("_debug".into(), d.clone());
+            }
+            println!("{}", serde_json::Value::Object(obj));
+            std::process::exit(0);
+        }
+        Err((error, message)) => output::user_error(&error, &message),
+    }
+}
+
+/// Reads `domains.list` and the per-domain `*.subdomains` files for `username`
+/// from the `DirectAdmin` data dir. Must be called as root.
 fn read_domains_files(username: &str, filter: Option<&str>) -> Vec<(String, Vec<String>)> {
-    let base = format!("/usr/local/directadmin/data/users/{username}");
+    let base = format!("{DA_USERS_BASE}/{username}");
 
     let list_content = std::fs::read_to_string(format!("{base}/domains.list")).unwrap_or_default();
 
@@ -335,17 +408,16 @@ fn read_domains_files(username: &str, filter: Option<&str>) -> Vec<(String, Vec<
         .collect()
 }
 
-/// Constrói a base do objeto _debug se --debug estiver ativo
 fn build_debug_base(
     enabled: bool,
     user: &str,
     home: &str,
-    state_dir: Option<&std::path::Path>,
+    state_dir: Option<&Path>,
 ) -> Option<serde_json::Value> {
     if !enabled {
         return None;
     }
-    let sd = state_dir.and_then(|p| p.to_str()).unwrap_or("").to_string();
+    let sd = state_dir.and_then(Path::to_str).unwrap_or("").to_string();
     Some(json!({
         "user": user,
         "home": home,

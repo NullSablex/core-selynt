@@ -9,8 +9,8 @@ pub const SOCKET_PATHS: &[&str] = &[
 ];
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+const RAW_EXCERPT_CHARS: usize = 200;
 
-/// Resolve o socket DA (testa na ordem, retorna o primeiro que existir)
 pub fn resolve_socket() -> Option<&'static str> {
     SOCKET_PATHS
         .iter()
@@ -18,7 +18,11 @@ pub fn resolve_socket() -> Option<&'static str> {
         .copied()
 }
 
-/// Resolve o cookie a partir das env vars CGI (ordem de prioridade)
+/// Resolves the DA session cookie from the CGI environment.
+///
+/// Priority order matches what DirectAdmin sets depending on whether the
+/// request comes from the embedded plugin (`COOKIESTRING`), a CGI front-end
+/// (`HTTP_COOKIE`) or a long-lived admin session (`SESSION`).
 pub fn resolve_cookie() -> String {
     if let Ok(c) = std::env::var("COOKIESTRING") {
         return c;
@@ -32,11 +36,11 @@ pub fn resolve_cookie() -> String {
     String::new()
 }
 
-/// Faz GET HTTP/1.0 sobre Unix socket.
-/// Retorna `(body, raw_excerpt)` onde raw_excerpt são os primeiros 200 chars da resposta bruta.
+/// Performs an HTTP/1.0 GET over a Unix socket and returns `(body, raw_excerpt)`,
+/// where `raw_excerpt` is the first 200 characters of the wire response (useful
+/// for debug output when DA replies with something unexpected).
 pub fn da_get(socket_path: &str, path: &str, cookie: &str) -> Result<(String, String), String> {
-    let mut stream =
-        UnixStream::connect(socket_path).map_err(|e| format!("connect: {e}"))?;
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| format!("connect: {e}"))?;
     stream.set_read_timeout(Some(TIMEOUT)).ok();
     stream.set_write_timeout(Some(TIMEOUT)).ok();
 
@@ -52,9 +56,8 @@ pub fn da_get(socket_path: &str, path: &str, cookie: &str) -> Result<(String, St
         .read_to_string(&mut response)
         .map_err(|e| format!("read: {e}"))?;
 
-    let raw_excerpt: String = response.chars().take(200).collect();
+    let raw_excerpt: String = response.chars().take(RAW_EXCERPT_CHARS).collect();
 
-    // Separar headers do body (HTTP separa com \r\n\r\n ou \n\n)
     let body = if let Some(idx) = response.find("\r\n\r\n") {
         response[idx + 4..].to_string()
     } else if let Some(idx) = response.find("\n\n") {
@@ -66,7 +69,7 @@ pub fn da_get(socket_path: &str, path: &str, cookie: &str) -> Result<(String, St
     Ok((body, raw_excerpt))
 }
 
-/// Parse de `list[]=val1&list[]=val2` → Vec<String>
+/// Parses `list[]=val1&list[]=val2` URL-encoded payloads into a `Vec<String>`.
 pub fn parse_list(body: &str) -> Vec<String> {
     body.split('&')
         .filter_map(|pair| {
@@ -87,12 +90,12 @@ fn url_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    result.push(byte as char);
-                    i += 3;
-                    continue;
-                }
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                && let Ok(byte) = u8::from_str_radix(hex, 16)
+            {
+                result.push(byte as char);
+                i += 3;
+                continue;
             }
         } else if bytes[i] == b'+' {
             result.push(' ');

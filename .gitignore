@@ -1,1 +1,57 @@
+# --- Rust / Cargo ---
 /target
+**/*.rs.bk
+*.pdb
+
+# --- MkDocs (docs build output) ---
+/site
+
+# --- Python venv (used by docs/requirements.txt locally) ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# --- Secrets / env files ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.toml
+secrets.yaml
+
+# --- Editors / IDEs ---
+.vscode/
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Logs and runtime artifacts ---
+*.log
+logs/
+*.pid
+*.sock
+
+# --- Backups / temporary ---
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# --- Coverage / profiling ---
+lcov.info
+*.profraw
+*.profdata
+tarpaulin-report.html
+coverage/
+
+# --- OS / misc ---
+.cache/

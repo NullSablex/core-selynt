@@ -1,0 +1,58 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: 'New features'
+    labels:
+      - 'feat'
+      - 'feature'
+      - 'enhancement'
+  - title: 'Fixes'
+    labels:
+      - 'fix'
+      - 'bugfix'
+      - 'bug'
+  - title: 'Security'
+    labels:
+      - 'security'
+  - title: 'Documentation'
+    labels:
+      - 'docs'
+      - 'documentation'
+  - title: 'Maintenance'
+    labels:
+      - 'chore'
+      - 'ci'
+      - 'refactor'
+      - 'deps'
+      - 'dependencies'
+
+change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+      - 'breaking-change'
+  minor:
+    labels:
+      - 'minor'
+      - 'feat'
+      - 'feature'
+      - 'enhancement'
+  patch:
+    labels:
+      - 'patch'
+      - 'fix'
+      - 'bugfix'
+      - 'docs'
+      - 'chore'
+      - 'ci'
+  default: patch
+
+template: |
+  $CHANGES
+
+  Thanks to everyone who contributed: $CONTRIBUTORS

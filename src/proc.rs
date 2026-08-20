@@ -1,83 +1,74 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Lê o UID real do processo via /proc/{pid}/status
+const TCP_LISTEN_STATE: &str = "0A";
+const PROC_NET_INODE_FIELD: usize = 9;
+const PROC_STAT_UTIME_OFFSET: usize = 11;
+
 pub fn read_proc_uid(pid: u32) -> Option<u32> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            return rest.split_whitespace().next()?.parse().ok();
-        }
-    }
-    None
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
 }
 
-/// Lê o starttime do processo via /proc/{pid}/stat (campo 22, índice 19 após comm)
+/// Reads the process start time (field 22) from `/proc/{pid}/stat`.
 ///
-/// O campo comm pode conter espaços — usamos rfind(')') para ignorá-lo com segurança.
+/// The `comm` field can contain spaces and parentheses, so we use `rfind(')')`
+/// to locate its end before tokenising the rest of the line.
 pub fn read_proc_starttime(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Localiza o fim de "(comm)" — pode conter espaços
     let after_paren = content.rfind(')')?;
-    let rest = &content[after_paren + 2..]; // skip ") "
-    // Campos após comm (índice 0-based): state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
-    // tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10) utime(11) stime(12)
-    // cutime(13) cstime(14) priority(15) nice(16) num_threads(17) itrealvalue(18) starttime(19)
+    let rest = &content[after_paren + 2..];
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Verifica se o processo existe em /proc
 pub fn is_process_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-/// Lê utime + stime de /proc/{pid}/stat (ticks de CPU consumidos pelo processo).
+/// Sum of `utime + stime` from `/proc/{pid}/stat` — total CPU ticks consumed.
 pub fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_paren = content.rfind(')')?;
     let rest = &content[after_paren + 2..];
     let mut it = rest.split_whitespace();
-    let utime: u64 = it.nth(11)?.parse().ok()?;
+    let utime: u64 = it.nth(PROC_STAT_UTIME_OFFSET)?.parse().ok()?;
     let stime: u64 = it.next()?.parse().ok()?;
     Some(utime + stime)
 }
 
-/// Lê VmRSS (KB) de /proc/{pid}/status.
+/// `VmRSS` in kilobytes from `/proc/{pid}/status`.
 pub fn read_proc_rss_kb(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            return rest.split_whitespace().next()?.parse().ok();
-        }
-    }
-    None
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
 }
 
-/// Snapshot de métricas de progresso de um processo.
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessSnapshot {
     pub cpu_ticks: u64,
     pub rss_kb: u64,
 }
 
-/// Lê um snapshot de progresso do processo. Retorna None se o processo não existe.
 pub fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let cpu_ticks = read_proc_cpu_ticks(pid)?;
     let rss_kb = read_proc_rss_kb(pid).unwrap_or_default();
     Some(ProcessSnapshot { cpu_ticks, rss_kb })
 }
 
-/// Verifica se o processo abriu portas de rede (TCP ou UDP).
+/// Reports whether the process is listening on any TCP or UDP socket.
 ///
-/// Algoritmo:
-///   1. Percorre /proc/{pid}/fd/ e coleta inodes de sockets
-///   2. TCP: busca inodes em /proc/net/tcp{,6} com estado LISTEN (0x0A)
-///   3. UDP: busca inodes em /proc/net/udp{,6} — qualquer entrada = porta bound
+/// We walk `/proc/{pid}/fd/`, collect the inodes of every socket FD, then scan
+/// `/proc/net/{tcp,tcp6,udp,udp6}` and match against those inodes. UDP entries
+/// are treated as listening because UDP has no `LISTEN` state — any bound
+/// socket counts.
 pub fn has_network_listen(pid: u32) -> bool {
-    let fd_dir = format!("/proc/{pid}/fd");
-    let entries = match std::fs::read_dir(&fd_dir) {
-        Ok(e) => e,
-        Err(_) => return false,
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
     };
 
     let mut socket_inodes: HashSet<u64> = HashSet::new();
@@ -96,42 +87,38 @@ pub fn has_network_listen(pid: u32) -> bool {
         return false;
     }
 
-    // Helper: extrai inode (campo 9) de uma linha /proc/net/*
     let extract_inode = |line: &str| -> Option<u64> {
-        let mut fields = line.split_whitespace();
-        // 0=sl 1=local 2=rem 3=st 4=tx:rx 5=tr:tm 6=retrnsmt 7=uid 8=timeout 9=inode
-        for _ in 0..9 {
-            fields.next();
-        }
-        fields.next()?.parse().ok()
+        line.split_whitespace()
+            .nth(PROC_NET_INODE_FIELD)?
+            .parse()
+            .ok()
     };
 
-    // TCP: estado LISTEN (0x0A)
     for f in &["/proc/net/tcp", "/proc/net/tcp6"] {
-        if let Ok(content) = std::fs::read_to_string(f) {
-            for line in content.lines().skip(1) {
-                let state = line.split_whitespace().nth(3).unwrap_or("");
-                if state != "0A" {
-                    continue;
-                }
-                if let Some(inode) = extract_inode(line)
-                    && socket_inodes.contains(&inode)
-                {
-                    return true;
-                }
+        let Ok(content) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            if line.split_whitespace().nth(3) != Some(TCP_LISTEN_STATE) {
+                continue;
+            }
+            if let Some(inode) = extract_inode(line)
+                && socket_inodes.contains(&inode)
+            {
+                return true;
             }
         }
     }
 
-    // UDP: qualquer socket bound (UDP não tem estado LISTEN)
     for f in &["/proc/net/udp", "/proc/net/udp6"] {
-        if let Ok(content) = std::fs::read_to_string(f) {
-            for line in content.lines().skip(1) {
-                if let Some(inode) = extract_inode(line)
-                    && socket_inodes.contains(&inode)
-                {
-                    return true;
-                }
+        let Ok(content) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            if let Some(inode) = extract_inode(line)
+                && socket_inodes.contains(&inode)
+            {
+                return true;
             }
         }
     }

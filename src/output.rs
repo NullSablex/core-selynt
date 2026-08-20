@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 use std::process;
 
-/// Saída de sucesso: {"ok": true, ...extra} → exit 0
 pub fn success(extra: Value) -> ! {
     let mut obj = serde_json::Map::new();
     obj.insert("ok".to_string(), Value::Bool(true));
@@ -12,7 +11,6 @@ pub fn success(extra: Value) -> ! {
     process::exit(0);
 }
 
-/// Erro de usuário (input inválido, app não existe, estado incorreto) → exit 1
 pub fn user_error(error: &str, message: &str) -> ! {
     println!(
         "{}",
@@ -21,7 +19,6 @@ pub fn user_error(error: &str, message: &str) -> ! {
     process::exit(1);
 }
 
-/// Erro de sistema (filesystem, permissão, processo, socket) → exit 2
 pub fn system_error(error: &str, message: &str) -> ! {
     println!(
         "{}",
@@ -30,7 +27,8 @@ pub fn system_error(error: &str, message: &str) -> ! {
     process::exit(2);
 }
 
-/// Debug — apenas com SELYNT_DEBUG=1, nunca parseado pelo plugin
+/// Emits a debug line on stderr only when `SELYNT_DEBUG=1`. The plugin never
+/// parses stderr, so this is safe to call from any code path.
 pub fn debug(msg: impl std::fmt::Display) {
     if std::env::var("SELYNT_DEBUG").as_deref() == Ok("1") {
         eprintln!("[DEBUG] {msg}");

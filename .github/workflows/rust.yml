@@ -1,0 +1,122 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Default: read-only. Each job opts in to extra scopes when needed.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test, clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --target x86_64-unknown-linux-musl --verbose
+
+      - name: Test
+        run: cargo test --target x86_64-unknown-linux-musl --verbose
+
+      - name: Clippy (strict)
+        # Strict mode: every lint group is denied, not warned. Any finding from
+        # `pedantic`, `nursery` or `cargo` fails the build. `--all-targets`
+        # covers lib/bin/tests/examples; `--all-features` ensures no
+        # feature-gated code is silently skipped.
+        run: |
+          cargo clippy \
+            --target x86_64-unknown-linux-musl \
+            --all-targets \
+            --all-features \
+            -- \
+            -D warnings \
+            -D clippy::all \
+            -D clippy::pedantic \
+            -D clippy::nursery \
+            -D clippy::cargo
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    # rustsec/audit-check opens issues for new advisories and posts
+    # review comments on PRs that introduce vulnerable dependencies.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  coverage:
+    name: Coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install Rust (stable + llvm-tools)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate LCOV report
+        run: cargo llvm-cov --target x86_64-unknown-linux-musl --lcov --output-path lcov.info
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
