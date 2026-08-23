@@ -99,7 +99,7 @@ pub fn cmd_restart(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Va
         stop_internal(state_dir, name, &meta, 10);
     }
 
-    super::cmd_start(state_dir, name, web_user, dbg)
+    super::cmd_start(state_dir, name, web_user, None, dbg)
 }
 
 pub fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
@@ -197,6 +197,62 @@ pub fn cmd_set_node_version(
     ))
 }
 
+/// Sets (or clears) an app's memory cap. Stored in the `.app` file and applied
+/// on the next start — the running scope keeps its current limit.
+/// Writes the cap into the `.app` file. Separate from `cmd_set_memory_max` so
+/// the root prelude can persist it *before* re-resolving every sibling's cap.
+pub fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, gid: u32) {
+    if megabytes != 0 && megabytes < 16 {
+        return;   // validated (and reported) by cmd_set_memory_max
+    }
+    let app_file = state_dir.join(".run").join(format!("{name}.app"));
+    let Ok(current) = std::fs::read_to_string(&app_file) else {
+        return;
+    };
+
+    let bytes = megabytes.saturating_mul(1024 * 1024);
+    let mut out = String::with_capacity(current.len() + 32);
+    for line in current.lines() {
+        if line.split_once('=').map(|(k, _)| k.trim()) == Some("memory_max") {
+            continue;   // rewritten below (or dropped, when clearing)
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if bytes > 0 {
+        out.push_str(&format!("memory_max={bytes}\n"));
+    }
+    let _ = atomic_write(&app_file, out.as_bytes()).and_then(|()| set_perm(&app_file, 0o600));
+    // This runs as root, so the rewritten file would end up owned by root and
+    // become unreadable to the user once privileges are dropped — the command
+    // would then fail with `app_not_found` on its own file.
+    let _ = crate::state::chown_path(&app_file, uid, gid);
+}
+
+pub fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, dbg: Option<&Value>) -> ! {
+    if load_app_meta(state_dir, name).is_err() {
+        user_error("app_not_found", &format!("app '{name}' not found"));
+    }
+    // 16 MB is below anything a Node process can start in; accepting less would
+    // just produce an app that is OOM-killed on boot.
+    if megabytes != 0 && megabytes < 16 {
+        user_error("invalid_memory_max", "memory cap must be 0 (auto) or at least 16 MB");
+    }
+
+    // The write and the cap re-resolution already happened in the root prelude.
+    let bytes = megabytes.saturating_mul(1024 * 1024);
+    let (status, _, _) = get_status(state_dir, name);
+    success(with_debug(
+        json!({
+            "memory_max": if bytes > 0 { json!(bytes) } else { json!(null) },
+            // The new cap is live already; a restart is only needed for the app
+            // to *use* more memory, never for the limit to take effect.
+            "running": status == "RUNNING",
+        }),
+        dbg,
+    ))
+}
+
 pub fn cmd_remove(state_dir: &Path, name: &str, delete_dir: bool, dbg: Option<&Value>) -> ! {
     let Ok(meta) = load_app_meta(state_dir, name) else {
         user_error("app_not_found", &format!("app '{name}' not found"));
@@ -217,7 +273,28 @@ pub fn cmd_remove(state_dir: &Path, name: &str, delete_dir: bool, dbg: Option<&V
     let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
 
     if delete_dir {
-        let _ = std::fs::remove_dir_all(&meta.cwd);
+        // Never delete *through* a link. `remove_dir_all` on a symlinked cwd
+        // wipes the target's contents, so an app pointed at a data directory
+        // would take it down with it. Re-checked here rather than trusting the
+        // stored path, since apps registered before this validation existed can
+        // still hold an escaping cwd.
+        match std::fs::symlink_metadata(&cwd_path) {
+            Ok(md) if md.file_type().is_symlink() => user_error(
+                "cwd_is_symlink",
+                "refusing to delete a cwd that is a symlink; remove the link manually",
+            ),
+            Ok(_) => {
+                if cwd_escapes_home(&cwd_path) {
+                    user_error(
+                        "cwd_outside_home",
+                        "refusing to delete a cwd outside the user's home directory",
+                    );
+                }
+                let _ = std::fs::remove_dir_all(&cwd_path);
+            }
+            // Already gone — nothing to delete.
+            Err(_) => {}
+        }
     } else {
         // Keep user files (.env, logs) when the directory is preserved — only
         // strip files that no longer make sense without the app registration.
@@ -258,13 +335,66 @@ pub fn cmd_logs(
         user_error("app_not_found", &format!("app '{name}' not found"));
     };
 
+    // Logs are live output: a stopped app has nothing to say. Its file still
+    // holds the last run's lines, but showing those would present a finished
+    // run as if it were current.
+    let (status, _, _) = get_status(state_dir, name);
+    if status != "RUNNING" {
+        success(with_debug(json!({ "lines": Vec::<String>::new() }), dbg));
+    }
+
     let suffix = if use_stderr { "err" } else { "out" };
     let log_file = PathBuf::from(&meta.cwd)
         .join("logs")
         .join(format!("{name}.{suffix}.log"));
 
-    let log_lines = read_tail(&log_file, lines);
+    // Apps commonly log through libraries that colourise unconditionally (Rust's
+    // tracing-subscriber, chalk, colorette…). Written to a file those escapes
+    // are just bytes, and the panel renders them as literal `[2m`/`[0m` noise,
+    // so strip them here — the viewer is HTML, not a terminal.
+    let log_lines: Vec<String> = read_tail(&log_file, lines)
+        .iter()
+        .map(|l| strip_ansi(l))
+        .collect();
     success(with_debug(json!({ "lines": log_lines }), dbg))
+}
+
+/// Removes ANSI escape sequences (CSI/OSC and the shorter two-byte forms) from
+/// `s`, leaving the plain text.
+pub(super) fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: params/intermediates, then a final byte in @..~
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: runs until BEL or the ST sequence (ESC \).
+            Some(']') => {
+                let mut prev_esc = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (prev_esc && c == '\\') {
+                        break;
+                    }
+                    prev_esc = c == '\x1b';
+                }
+            }
+            // Two-byte escapes (ESC c, ESC =, …): drop both.
+            Some(_) => {}
+            None => break,
+        }
+    }
+    out
 }
 
 /// Efficient tail: reads back from EOF in `LOG_TAIL_CHUNK`-sized blocks until
@@ -363,6 +493,95 @@ fn validate_add_args(args: &AddArgs<'_>, cwd: &str) {
                 &format!("{field} must not contain newlines or null bytes"),
             );
         }
+    }
+    validate_cwd_within_home(cwd);
+}
+
+/// True when `path` resolves outside `$HOME` (or cannot be resolved at all).
+/// Used on the delete path, where failing closed is the safe default.
+fn cwd_escapes_home(path: &Path) -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return true;
+    };
+    let (Ok(home_real), Ok(target)) = (
+        std::fs::canonicalize(&home),
+        std::fs::canonicalize(path),
+    ) else {
+        return true;
+    };
+    !target.starts_with(&home_real)
+}
+
+/// Rejects a `cwd` that escapes the user's home directory.
+///
+/// Two ways out existed. A plain path elsewhere (`/tmp/app`) put the code in a
+/// world-writable place, where any other account could swap the entry file that
+/// then runs as this user. And a symlink under the home pointing outside it was
+/// followed by both `add` (writing `.env` and the entry through it) and by
+/// `remove --delete-dir`, whose `remove_dir_all` deletes the *target's*
+/// contents — a confirmed way to destroy files the app never owned.
+///
+/// So the check resolves symlinks on every existing ancestor and demands the
+/// result stay under `$HOME`.
+fn validate_cwd_within_home(cwd: &str) {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => user_error("cwd_outside_home", "HOME is not set; cannot validate cwd"),
+    };
+    match check_cwd_within_home(cwd, Path::new(&home)) {
+        Ok(()) => {}
+        Err(CwdError::NotAbsolute) => user_error("invalid_cwd", "cwd must be an absolute path"),
+        Err(CwdError::Unresolvable) => user_error("invalid_cwd", "cwd could not be resolved"),
+        Err(CwdError::Outside { resolved, home }) => user_error(
+            "cwd_outside_home",
+            &format!("cwd must stay inside {home} (resolved to {resolved})"),
+        ),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CwdError {
+    NotAbsolute,
+    Unresolvable,
+    Outside { resolved: String, home: String },
+}
+
+/// Resolves `cwd` (following symlinks on every existing ancestor) and checks it
+/// lands inside `home`. Split from `validate_cwd_within_home` so the decision is
+/// testable without the process-exiting error path.
+pub(super) fn check_cwd_within_home(cwd: &str, home: &Path) -> Result<(), CwdError> {
+    let home_real = std::fs::canonicalize(home).map_err(|_| CwdError::Unresolvable)?;
+
+    let path = PathBuf::from(cwd);
+    if !path.is_absolute() {
+        return Err(CwdError::NotAbsolute);
+    }
+
+    // The leaf usually doesn't exist yet (add creates it), so canonicalize the
+    // deepest existing ancestor and re-append the remainder. Any symlink along
+    // the way is resolved by that call.
+    let mut existing = path.as_path();
+    let mut rest = Vec::new();
+    let resolved = loop {
+        if let Ok(c) = std::fs::canonicalize(existing) {
+            break c.join(rest.iter().rev().collect::<PathBuf>());
+        }
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Err(CwdError::Unresolvable),
+        }
+    };
+
+    if resolved.starts_with(&home_real) {
+        Ok(())
+    } else {
+        Err(CwdError::Outside {
+            resolved: resolved.display().to_string(),
+            home: home_real.display().to_string(),
+        })
     }
 }
 
@@ -474,4 +693,141 @@ fn is_elf(path: &Path) -> bool {
     std::fs::File::open(path)
         .and_then(|mut f| f.read_exact(&mut buf))
         .is_ok_and(|()| buf == [0x7f, b'E', b'L', b'F'])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds an isolated home under the OS temp dir: `<tmp>/selynt-test-<n>/home`
+    /// plus a sibling `outside/` to point escapes at.
+    fn sandbox(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("selynt-test-{tag}-{}", std::process::id()));
+        let home = base.join("home");
+        let outside = base.join("outside");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(home.join("apps")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        (home, outside)
+    }
+
+    #[test]
+    fn accepts_cwd_inside_home() {
+        let (home, _) = sandbox("inside");
+        let cwd = home.join("apps/myapp");
+        assert_eq!(check_cwd_within_home(cwd.to_str().unwrap(), &home), Ok(()));
+    }
+
+    #[test]
+    fn accepts_cwd_that_does_not_exist_yet() {
+        // `add` creates the directory afterwards, so a missing leaf is normal.
+        let (home, _) = sandbox("missing");
+        let cwd = home.join("apps/deep/not/created/yet");
+        assert_eq!(check_cwd_within_home(cwd.to_str().unwrap(), &home), Ok(()));
+    }
+
+    #[test]
+    fn rejects_cwd_outside_home() {
+        let (home, outside) = sandbox("outside");
+        let cwd = outside.join("app");
+        assert!(matches!(
+            check_cwd_within_home(cwd.to_str().unwrap(), &home),
+            Err(CwdError::Outside { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_dotdot_traversal_out_of_home() {
+        let (home, _) = sandbox("dotdot");
+        let cwd = format!("{}/apps/../../outside/app", home.display());
+        assert!(matches!(
+            check_cwd_within_home(&cwd, &home),
+            Err(CwdError::Outside { .. })
+        ));
+    }
+
+    #[test]
+    fn keeps_dotdot_that_stays_inside_home() {
+        let (home, _) = sandbox("dotdot-ok");
+        let cwd = format!("{}/apps/../apps/myapp", home.display());
+        assert_eq!(check_cwd_within_home(&cwd, &home), Ok(()));
+    }
+
+    /// The vector that destroyed data: a link under the home whose target is
+    /// elsewhere. `remove --delete-dir` would wipe the target's contents.
+    #[test]
+    fn rejects_symlink_pointing_outside_home() {
+        let (home, outside) = sandbox("symlink");
+        let link = home.join("apps/escape");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(matches!(
+            check_cwd_within_home(link.to_str().unwrap(), &home),
+            Err(CwdError::Outside { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_symlinked_ancestor_pointing_outside_home() {
+        // The link is mid-path, not the leaf — canonicalize must still catch it.
+        let (home, outside) = sandbox("symlink-mid");
+        let link = home.join("apps/bridge");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let cwd = link.join("nested/app");
+        assert!(matches!(
+            check_cwd_within_home(cwd.to_str().unwrap(), &home),
+            Err(CwdError::Outside { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_symlink_that_stays_within_home() {
+        let (home, _) = sandbox("symlink-in");
+        let target = home.join("apps/real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = home.join("apps/alias");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(check_cwd_within_home(link.to_str().unwrap(), &home), Ok(()));
+    }
+
+    #[test]
+    fn rejects_relative_cwd() {
+        let (home, _) = sandbox("relative");
+        assert_eq!(
+            check_cwd_within_home("apps/myapp", &home),
+            Err(CwdError::NotAbsolute)
+        );
+    }
+
+    /// `/home/user2` must not pass just because it shares a textual prefix with
+    /// `/home/user` — starts_with on components, not on the raw string.
+    #[test]
+    fn rejects_sibling_home_with_shared_prefix() {
+        let base = std::env::temp_dir().join(format!("selynt-test-prefix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("user");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(base.join("user2")).unwrap();
+        let cwd = base.join("user2/app");
+        assert!(matches!(
+            check_cwd_within_home(cwd.to_str().unwrap(), &home),
+            Err(CwdError::Outside { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_safe_component_blocks_traversal() {
+        assert!(super::super::validate_safe_component("index.js"));
+        assert!(!super::super::validate_safe_component("../etc/passwd"));
+        assert!(!super::super::validate_safe_component("a/b"));
+        assert!(!super::super::validate_safe_component(""));
+        assert!(!super::super::validate_safe_component("a\0b"));
+    }
+
+    #[test]
+    fn validate_meta_value_blocks_forged_keys() {
+        assert!(validate_meta_value("/home/user/apps/x"));
+        assert!(!validate_meta_value("x\nhost=evil"));
+        assert!(!validate_meta_value("x\rhost=evil"));
+        assert!(!validate_meta_value("x\0y"));
+    }
 }

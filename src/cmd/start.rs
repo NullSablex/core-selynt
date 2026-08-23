@@ -40,7 +40,13 @@ const KILL_GRACE: Duration = Duration::from_millis(500);
 const NETWORK_PORT_FORBIDDEN_MSG: &str =
     "process opened a network port (TCP/UDP) — only Unix sockets are allowed";
 
-pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Value>) -> ! {
+pub fn cmd_start(
+    state_dir: &Path,
+    name: &str,
+    web_user: &str,
+    spawned_pid: Option<u32>,
+    dbg: Option<&Value>,
+) -> ! {
     let Ok(meta) = load_app_meta(state_dir, name) else {
         user_error("app_not_found", &format!("app '{name}' not found"));
     };
@@ -71,7 +77,12 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
     let pid_file = state_dir.join(".run").join(format!("{name}.pid"));
     let meta_file = state_dir.join(".run").join(format!("{name}.meta"));
 
-    let pid = spawn_app(&meta, name, &socket_path);
+    // Normally the app was already spawned into its own systemd scope by the
+    // root prelude; fall back to spawning here when that path is unavailable.
+    let pid = match spawned_pid {
+        Some(p) => p,
+        None => spawn_app(&meta, name, &socket_path, None, None),
+    };
 
     if let Err(e) = persist_state(&pid_file, &meta_file, pid) {
         let _ = kill(to_nix_pid(pid), Signal::SIGKILL);
@@ -116,12 +127,59 @@ pub fn cmd_start(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Valu
     success(with_debug(json!({ "pid": pid }), dbg))
 }
 
-fn spawn_app(meta: &AppMeta, name: &str, socket_path: &Path) -> u32 {
+/// Spawns an app into its own systemd scope. Must be called as root, before
+/// the privilege drop: registering a transient unit needs the system bus, and
+/// an unprivileged caller gets "Interactive authentication required".
+/// `systemd-run --uid/--gid` drops to the app's account for us.
+///
+/// Returns `None` when systemd is unavailable, leaving `cmd_start` to spawn the
+/// app the ordinary way after the drop.
+pub fn spawn_into_scope(
+    meta: &AppMeta,
+    name: &str,
+    state_dir: &Path,
+    username: &str,
+    uid: u32,
+    gid: u32,
+) -> Option<u32> {
+    if !systemd_available() {
+        return None;
+    }
+    let socket_path = state_dir.join(".sockets").join(&meta.host);
+    let _ = std::fs::remove_file(&socket_path);
+
+    // Resolve the cap here, in the root prelude: it needs the account's
+    // allowance from DirectAdmin (root-only) plus every sibling app's setting.
+    let limits = super::stats::app_limits_for(state_dir, username, name, meta);
+
+    Some(spawn_app(
+        meta,
+        name,
+        &socket_path,
+        Some((username, uid, gid)),
+        limits,
+    ))
+}
+
+fn spawn_app(
+    meta: &AppMeta,
+    name: &str,
+    socket_path: &Path,
+    scope: Option<(&str, u32, u32)>,
+    limits: Option<super::memory::AppLimits>,
+) -> u32 {
     let cwd_path = PathBuf::from(&meta.cwd);
     let log_out = cwd_path.join("logs").join(format!("{name}.out.log"));
     let log_err = cwd_path.join("logs").join(format!("{name}.err.log"));
     rotate_log_if_needed(&log_out);
     rotate_log_if_needed(&log_err);
+
+    // Each run starts with empty logs. The panel shows what the app is saying
+    // *now*: keeping the previous run's output around made stale errors look
+    // current — the `NoNewPrivileges` failures stayed on screen long after the
+    // bug was fixed — and a stopped app appeared to still have something to say.
+    let _ = std::fs::write(&log_out, b"");
+    let _ = std::fs::write(&log_err, b"");
 
     let stdout_file = match std::fs::OpenOptions::new()
         .append(true)
@@ -145,15 +203,27 @@ fn spawn_app(meta: &AppMeta, name: &str, socket_path: &Path) -> u32 {
     let socket_str = socket_path.to_string_lossy().to_string();
 
     let mut cmd = build_command(meta, &entry_path);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(stdout_file);
-    cmd.stderr(stderr_file);
-    cmd.current_dir(&meta.cwd);
     cmd.env("SELYNT_SOCKET", &socket_str);
     cmd.env("SELYNT_HOST", &meta.host);
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
+
+    // Give the app its own cgroup where systemd is available, so it does not
+    // die with whatever process happened to start it. Falls back to a bare
+    // spawn elsewhere.
+    if let Some((username, uid, gid)) = scope
+        && systemd_available()
+    {
+        cmd = wrap_in_scope(cmd, username, name, uid, gid, limits);
+    }
+
+    // Applied after wrapping: these are not readable back off a Command, so
+    // they have to land on whichever one is actually spawned.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(stdout_file);
+    cmd.stderr(stderr_file);
+    cmd.current_dir(&meta.cwd);
 
     // `setsid` makes the child a new session leader so signals delivered to
     // the parent (or the controlling terminal) don't leak into the child tree.
@@ -217,6 +287,87 @@ fn build_command(meta: &AppMeta, entry_path: &Path) -> Command {
     } else {
         Command::new(entry_path)
     }
+}
+
+/// Name of the transient systemd scope backing an app.
+fn scope_unit_name(username: &str, name: &str) -> String {
+    format!("selynt-{username}-{name}.scope")
+}
+
+/// True when this host can place apps in their own systemd scope.
+///
+/// Requires `systemd-run` and a live system manager — a container without
+/// systemd as PID 1 has the binary but no bus to talk to.
+pub(super) fn systemd_available() -> bool {
+    Path::new("/run/systemd/system").is_dir()
+        && (Path::new("/usr/bin/systemd-run").exists() || Path::new("/bin/systemd-run").exists())
+}
+
+/// Wraps `cmd` in `systemd-run --scope` so the app lands in a cgroup of its own.
+///
+/// Without this an app inherits the cgroup of whatever started it — the CGI
+/// process, or the `boot-recover` unit. systemd then tears the app down along
+/// with that transient cgroup, which is why apps restored at boot died moments
+/// later, and why an app started from a login session was at the mercy of
+/// `KillUserProcesses`. Its own scope makes the app independent of its parent.
+///
+/// Registering a scope on the system bus is a privileged operation, so this has
+/// to run before the privilege drop; `--uid`/`--gid` hand the drop to systemd,
+/// which applies it to the app itself. Supplementary groups come from
+/// `initgroups` inside systemd, matching what `drop_privileges` would have done.
+///
+/// `--collect` drops the unit once it exits, so a crashed app leaves no failed
+/// unit behind blocking the next start under the same name.
+fn wrap_in_scope(
+    cmd: Command,
+    username: &str,
+    name: &str,
+    uid: u32,
+    gid: u32,
+    limits: Option<super::memory::AppLimits>,
+) -> Command {
+    let mut run = Command::new("systemd-run");
+    run.arg("--scope")
+        .arg("--quiet")
+        .arg("--collect")
+        .arg(format!("--unit={}", scope_unit_name(username, name)))
+        // The account's slice is the ceiling the kernel enforces over all of
+        // its apps together; the per-app maxima below may exceed it on purpose.
+        .arg(format!("--slice={}", super::memory::slice_unit_name(username)))
+        .arg(format!("--uid={uid}"))
+        .arg(format!("--gid={gid}"))
+        // Keep the app alive when systemd stops the unit that spawned it.
+        // (`--scope` only accepts a subset of unit properties; NoNewPrivileges
+        // is not among them — the drop below is handled by --uid/--gid.)
+        .arg("--property=KillMode=process");
+
+    // MemoryMin is what the app is guaranteed against reclaim; MemoryHigh
+    // throttles it first, giving it a chance to give memory back; MemoryMax is
+    // the hard stop where the OOM killer steps in. The slice above is what
+    // keeps the account as a whole in bounds.
+    if let Some(l) = limits {
+        run.arg(format!("--property=MemoryMin={}", l.min));
+        run.arg(format!("--property=MemoryHigh={}", l.high));
+        run.arg(format!("--property=MemoryMax={}", l.max));
+    }
+
+    run.arg(cmd.get_program());
+    for a in cmd.get_args() {
+        run.arg(a);
+    }
+    // Command exposes no way to read back stdio/cwd, so the caller reapplies
+    // those to the wrapper; env vars are readable and carried over here.
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => {
+                run.env(k, v);
+            }
+            None => {
+                run.env_remove(k);
+            }
+        }
+    }
+    run
 }
 
 fn persist_state(pid_file: &Path, meta_file: &Path, pid: u32) -> anyhow::Result<()> {
@@ -374,4 +525,97 @@ const fn next_stuck_count(
         _ => true,
     };
     if made_progress { 0 } else { current_stuck + 1 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_unit_name_is_namespaced_per_user_and_app() {
+        assert_eq!(scope_unit_name("bob", "api"), "selynt-bob-api.scope");
+        // Two users may run an app under the same name without colliding.
+        assert_ne!(
+            scope_unit_name("bob", "api"),
+            scope_unit_name("alice", "api")
+        );
+    }
+
+    #[test]
+    fn wrap_in_scope_keeps_program_and_args() {
+        let mut inner = Command::new("/usr/bin/node");
+        inner.arg("--import").arg("/tmp/loader.js").arg("/app/i.js");
+        let wrapped = wrap_in_scope(inner, "bob", "api", 1003, 1003, None);
+
+        assert_eq!(wrapped.get_program(), "systemd-run");
+        let args: Vec<String> = wrapped
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--scope".to_string()));
+        assert!(args.contains(&"--collect".to_string()));
+        assert!(args.contains(&"--unit=selynt-bob-api.scope".to_string()));
+        // The real command has to survive the wrapping, in order.
+        assert!(args.contains(&"/usr/bin/node".to_string()));
+        assert!(args.contains(&"/app/i.js".to_string()));
+        let node = args.iter().position(|a| a == "/usr/bin/node").unwrap();
+        let entry = args.iter().position(|a| a == "/app/i.js").unwrap();
+        assert!(node < entry, "argument order must be preserved");
+    }
+
+    /// The scope must carry the privilege drop: this runs as root, so without
+    /// --uid/--gid the app would keep running as root.
+    #[test]
+    fn wrap_in_scope_drops_privileges_via_systemd() {
+        let wrapped = wrap_in_scope(Command::new("/bin/true"), "bob", "api", 1003, 1004, None);
+        let args: Vec<String> = wrapped
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--uid=1003".to_string()));
+        assert!(args.contains(&"--gid=1004".to_string()));
+    }
+
+    /// Apps must land in the account's slice — that is where the collective
+    /// ceiling lives, and the per-app maxima intentionally exceed it.
+    #[test]
+    fn wrap_in_scope_places_app_in_the_user_slice() {
+        let limits = super::super::memory::AppLimits {
+            min: 64 * 1024 * 1024,
+            high: 96 * 1024 * 1024,
+            max: 128 * 1024 * 1024,
+        };
+        let wrapped = wrap_in_scope(Command::new("/bin/true"), "bob", "api", 1003, 1003, Some(limits));
+        let args: Vec<String> = wrapped
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--slice=selynt-bob.slice".to_string()));
+        assert!(args.contains(&"--property=MemoryMin=67108864".to_string()));
+        assert!(args.contains(&"--property=MemoryHigh=100663296".to_string()));
+        assert!(args.contains(&"--property=MemoryMax=134217728".to_string()));
+    }
+
+    /// Without an account allowance there is nothing to divide, so the app runs
+    /// unconstrained — the behaviour before limits existed.
+    #[test]
+    fn wrap_in_scope_omits_properties_without_limits() {
+        let wrapped = wrap_in_scope(Command::new("/bin/true"), "bob", "api", 1003, 1003, None);
+        let args: Vec<String> = wrapped
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|a| a.starts_with("--property=Memory")));
+    }
+
+    #[test]
+    fn wrap_in_scope_carries_environment_over() {
+        let mut inner = Command::new("/bin/true");
+        inner.env("SELYNT_SOCKET", "/run/app.sock");
+        let wrapped = wrap_in_scope(inner, "bob", "api", 1003, 1003, None);
+        let found = wrapped
+            .get_envs()
+            .any(|(k, v)| k == "SELYNT_SOCKET" && v == Some("/run/app.sock".as_ref()));
+        assert!(found, "app env must reach the wrapped command");
+    }
 }

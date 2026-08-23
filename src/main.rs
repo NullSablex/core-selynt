@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 
 use output::system_error;
 use state::{
-    drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user,
+    DA_USERS_BASE, drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user,
 };
 
 const STATE_BASE: &str = "/var/lib/selynt_panel";
-const DA_USERS_BASE: &str = "/usr/local/directadmin/data/users";
 
 #[derive(Parser)]
 #[command(
@@ -104,6 +103,17 @@ enum Commands {
         stderr: bool,
     },
 
+    /// Reports CPU and memory usage of an app, with the account's limits.
+    Stats { name: String },
+
+    /// Sets the memory cap of an app. `0` (or empty) restores "auto".
+    SetMemoryMax {
+        name: String,
+        /// Cap in megabytes; `0` clears it.
+        #[arg(long)]
+        megabytes: u64,
+    },
+
     /// Lists the user's domains and subdomains (reads DA data files as root).
     Domains {
         /// Filter by a specific domain.
@@ -168,6 +178,25 @@ fn main() {
         Err(e) => system_error("user_resolve_failed", &format!("{e:#}")),
     };
 
+    // `Admin` subcommands expose every user's apps and run privileged work in
+    // the prelude, so they are restricted to the callers the panel itself runs
+    // as. Without this any local account could read the whole server's app
+    // inventory — and `save-node-versions` would execute a caller-supplied
+    // binary as root via NVM_DIR.
+    if matches!(cli.command, Commands::Admin { .. }) && !state::caller_is_privileged() {
+        system_error(
+            "admin_required",
+            "administrative commands require root or the panel web user",
+        );
+    }
+
+    // Pin HOME to the resolved account's real home. It arrives from the caller,
+    // who could otherwise point it anywhere — and the cwd confinement check
+    // relies on it. `resolve_target_user` got this from getpwnam, not the
+    // environment, so it is the trustworthy value.
+    // SAFETY: single-threaded at this point; no other thread can observe env.
+    unsafe { std::env::set_var("HOME", &home) };
+
     let state_dir = resolve_state_dir(&username);
 
     if let Err(e) = init_state_dir(&state_dir, uid, gid) {
@@ -187,17 +216,26 @@ fn main() {
     output::debug(format!("state_dir={}", state_dir.display()));
 
     let dbg = build_debug_base(cli.debug, &username, &home, Some(&state_dir));
-    dispatch(cli.command, &state_dir, &web_user, prelude, dbg.as_ref())
+    dispatch(cli.command, &state_dir, &username, &web_user, prelude, dbg.as_ref())
 }
 
-/// Resolves the state dir for `username`. Honours `SELYNT_STATE_DIR` only when
-/// it falls under `/var/lib/selynt_panel/` and contains no `..` traversal.
+/// Resolves the state dir for `username`.
+///
+/// `SELYNT_STATE_DIR` is honoured only for privileged callers (root and the
+/// panel web user, which is how the CGI passes it). Checking just the prefix
+/// was not enough: `/var/lib/selynt_panel/<other-user>` satisfies it, so any
+/// local account could point the tool at somebody else's state and list, start,
+/// stop or remove their apps.
 fn resolve_state_dir(username: &str) -> PathBuf {
+    let own = format!("{STATE_BASE}/{username}");
+    if !state::caller_is_privileged() {
+        return PathBuf::from(own);
+    }
     PathBuf::from(
         std::env::var("SELYNT_STATE_DIR")
             .ok()
             .filter(|p| p.starts_with(&format!("{STATE_BASE}/")) && !p.contains(".."))
-            .unwrap_or_else(|| format!("{STATE_BASE}/{username}")),
+            .unwrap_or(own),
     )
 }
 
@@ -205,6 +243,13 @@ fn resolve_state_dir(username: &str) -> PathBuf {
 /// the files involved are owned by `diradmin` or live in directories the real
 /// user cannot traverse.
 struct RootPrelude {
+    /// Account resource limits from DirectAdmin's `user.conf`, which lives in a
+    /// `diradmin`-owned `0700` directory and is unreadable after the drop.
+    da_limits: cmd::DaLimits,
+    /// PID of an app spawned into its own systemd scope. Registering a scope
+    /// needs the system bus, so it happens here while we are still root;
+    /// `systemd-run --uid/--gid` performs the privilege drop for the app.
+    spawned_pid: Option<u32>,
     domains: Vec<(String, Vec<String>)>,
     admin_apps: Vec<serde_json::Value>,
     save_node_versions: Option<Result<serde_json::Value, (String, String)>>,
@@ -223,12 +268,59 @@ fn run_root_prelude(
         _ => Vec::new(),
     };
 
+    // Read for every command that touches memory limits, not just Stats: the
+    // account allowance is the pool everything else is derived from, and
+    // `user.conf` is only readable here, as root.
+    let da_limits = if matches!(
+        command,
+        Commands::Stats { .. }
+            | Commands::Start { .. }
+            | Commands::Stop { .. }
+            | Commands::Remove { .. }
+            | Commands::SetMemoryMax { .. }
+    ) {
+        cmd::read_da_limits(username)
+    } else {
+        cmd::DaLimits::default()
+    };
+
+    // A pin takes effect on the live scope immediately — waiting for a restart
+    // would leave the app on its old, larger ceiling. `systemctl set-property`
+    // needs root, hence here.
+    if let Commands::SetMemoryMax { name, megabytes } = command {
+        cmd::apply_memory_max(state_dir, name, *megabytes, uid, gid);
+        cmd::ensure_slice_cap(username, da_limits.memory_max);
+        cmd::reapply_app_limits(state_dir, username);
+    }
+
+    // Stopping or removing an app frees its share, so the survivors' guarantees
+    // go back up. The scope is still alive at this point — the process is only
+    // killed after the privilege drop — so it is excluded explicitly, or the
+    // others would be sized as if it were still competing.
+    if let Commands::Stop { name, .. } | Commands::Remove { name, .. } = command {
+        cmd::ensure_slice_cap(username, da_limits.memory_max);
+        cmd::reapply_app_limits_excluding(state_dir, username, name);
+    }
+
+    let mut spawned_pid = None;
     if let Commands::Start { name } = command
         && let Ok(meta) = load_app_meta(state_dir, name)
     {
+        // Re-resolve the running apps first: the app about to start counts
+        // itself in `app_limits_for`, so the others must adjust before it
+        // appears. Doing this after the spawn would delay the socket and trip
+        // the readiness check.
+        cmd::ensure_slice_cap(username, da_limits.memory_max);
+        cmd::reapply_app_limits_including(state_dir, username, name);
         let cwd = PathBuf::from(&meta.cwd);
         if let Err(e) = init_app_logs_dir(&cwd, uid, gid) {
             output::debug(format!("init_app_logs_dir: {e:#}"));
+        }
+        spawned_pid = cmd::spawn_into_scope(&meta, name, state_dir, username, uid, gid);
+        // The first app of an account creates the slice, so the call above had
+        // nothing to configure. Now it exists.
+        if spawned_pid.is_some() {
+            cmd::ensure_slice_cap(username, da_limits.memory_max);
         }
     }
 
@@ -265,6 +357,8 @@ fn run_root_prelude(
     };
 
     RootPrelude {
+        da_limits,
+        spawned_pid,
         domains,
         admin_apps,
         save_node_versions,
@@ -275,6 +369,7 @@ fn run_root_prelude(
 fn dispatch(
     command: Commands,
     state_dir: &Path,
+    username: &str,
     web_user: &str,
     prelude: RootPrelude,
     dbg: Option<&serde_json::Value>,
@@ -282,7 +377,13 @@ fn dispatch(
     match command {
         Commands::List => cmd::cmd_list(state_dir, dbg),
         Commands::Status { name } => cmd::cmd_status(state_dir, &name, dbg),
-        Commands::Start { name } => cmd::cmd_start(state_dir, &name, web_user, dbg),
+        Commands::Stats { name } => cmd::cmd_stats(state_dir, &name, username, prelude.da_limits, dbg),
+        Commands::SetMemoryMax { name, megabytes } => {
+            cmd::cmd_set_memory_max(state_dir, &name, megabytes, dbg)
+        }
+        Commands::Start { name } => {
+            cmd::cmd_start(state_dir, &name, web_user, prelude.spawned_pid, dbg)
+        }
         Commands::Stop { name, timeout } => cmd::cmd_stop(state_dir, &name, timeout, dbg),
         Commands::Restart { name } => cmd::cmd_restart(state_dir, &name, web_user, dbg),
         Commands::Add {

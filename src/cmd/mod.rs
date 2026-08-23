@@ -1,16 +1,24 @@
 mod admin;
 mod locale;
 mod manage;
+mod memory;
 mod node;
 mod start;
+pub(crate) mod stats;
 
 pub use admin::{cmd_admin_detect_nodes, cmd_admin_list, collect_admin_list, save_node_versions};
 pub use locale::{set_locale_global, set_locale_user};
 pub use manage::{
+    apply_memory_max, cmd_set_memory_max,
     AddArgs, cmd_add, cmd_domains, cmd_list, cmd_logs, cmd_remove, cmd_restart,
     cmd_set_node_version, cmd_status, cmd_stop,
 };
-pub use start::cmd_start;
+pub use start::{cmd_start, spawn_into_scope};
+pub use stats::{
+    DaLimits, cmd_stats, ensure_slice_cap, read_da_limits, reapply_app_limits,
+    reapply_app_limits_excluding,
+    reapply_app_limits_including,
+};
 
 use std::path::Path;
 use std::time::{Duration, Instant};

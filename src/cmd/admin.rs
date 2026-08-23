@@ -86,6 +86,15 @@ pub fn collect_admin_list() -> Vec<Value> {
             let (status, pid, started_at) = admin_get_status(&pid_file, &meta_file);
             let pid_val = pid.map_or(json!(null), |p| json!(p));
 
+            // Resource usage comes from the app's own cgroup. Folded into this
+            // sweep on purpose: the overview refreshes every 15s across every
+            // account, and one `stats` call per app would multiply that load.
+            let usage = if status == "RUNNING" {
+                super::stats::read_scope_usage(&user, &name)
+            } else {
+                None
+            };
+
             apps.push(json!({
                 "user":       user,
                 "name":       name,
@@ -97,6 +106,8 @@ pub fn collect_admin_list() -> Vec<Value> {
                 "pid":        pid_val,
                 "created_at": created_at,
                 "started_at": started_at,
+                "memory":     usage.map(|u| u.memory_bytes),
+                "cpu_usec":   usage.map(|u| u.cpu_usec),
             }));
         }
     }
@@ -115,11 +126,15 @@ pub fn collect_admin_list() -> Vec<Value> {
 /// Detects Node.js runtimes installed on the system. Returns
 /// `Vec<(path, version)>` — e.g. `("/usr/bin/node", "v22.22.0")`.
 pub(super) fn detect_node_versions() -> Vec<(String, String)> {
+    // Detection *executes* each candidate to read its `--version`, so whatever
+    // directory is accepted here is a directory whose contents get run. Allowing
+    // `/home/` meant any customer on a shared box could plant a binary there and
+    // have it executed — as root, when reached through `save-node-versions` in
+    // the root prelude. Keep this to root-controlled locations only.
     let nvm_dir_glob = std::env::var("NVM_DIR")
         .ok()
         .filter(|d| {
-            let safe =
-                d.starts_with("/home/") || d.starts_with("/opt/") || d.starts_with("/usr/local/");
+            let safe = d.starts_with("/opt/") || d.starts_with("/usr/local/");
             safe && !d.contains("..")
         })
         .map(|d| format!("{d}/versions/node/*/bin/node"));

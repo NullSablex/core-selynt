@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/NullSablex/core-selynt/releases"><img src="https://img.shields.io/badge/version-1.0.0-blue?style=flat-square" alt="Version"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/NullSablex/core-selynt"><img src="https://api.scorecard.dev/projects/github.com/NullSablex/core-selynt/badge?style=flat-square" alt="OpenSSF Scorecard"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square&logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/platform-Linux-lightgrey?style=flat-square&logo=linux" alt="Linux">

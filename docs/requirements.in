@@ -1,0 +1,8 @@
+# Direct documentation dependencies. Edit this file, never requirements.txt.
+#
+# Regenerate the lock after any change here:
+#   pip-compile --generate-hashes --allow-unsafe docs/requirements.in
+#
+# mkdocs-material pulls in mkdocs and pymdown-extensions, so both stay out of
+# this file and are pinned transitively in the lock.
+mkdocs-material
