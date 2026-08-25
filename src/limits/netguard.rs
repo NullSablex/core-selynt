@@ -78,11 +78,9 @@ pub(crate) fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
 /// Stops an offending app and everything it spawned.
 ///
 /// `stop_internal` is not usable here: it resolves the app through
-/// `get_status`, which only accepts a PID whose uid matches the caller's. This
-/// runs as root in the prelude, so the account's app reads as STOPPED and
-/// nothing would be killed. Signalling the cgroup's PIDs directly also catches
-/// the child that opened the port, which `stop_internal` would leave running
-/// even if it did stop the main process.
+/// `get_status`, which requires the PID's uid to match the caller's — as root
+/// the app reads as STOPPED and nothing is killed. Signalling the cgroup's PIDs
+/// also catches the child that opened the port.
 fn stop_offending_app(
     state_dir: &Path,
     name: &str,

@@ -1,11 +1,8 @@
 //! Filesystem primitives shared across the panel.
 //!
-//! [`atomic_write`] is the reason this module exists: the panel writes files
-//! that other processes read concurrently — the proxy configuration the web
-//! server reloads, an app's `.app` metadata — and a partially written file
-//! there is worse than no file at all. Writing to a temporary and renaming it
-//! makes the swap atomic, so a reader sees either the old contents or the new
-//! ones, never half of each.
+//! [`atomic_write`] is why this exists: the panel writes files other processes
+//! read concurrently, and a half-written one there is worse than none. Writing
+//! to a temporary and renaming makes the swap atomic.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;

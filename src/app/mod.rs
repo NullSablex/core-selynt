@@ -110,14 +110,10 @@ pub(crate) fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Op
 pub(crate) fn signal_sync() {
     // Records that the proxy config no longer matches the live apps.
     //
-    // It cannot be rewritten from here. Doing so means writing OpenLiteSpeed's
-    // configuration and reloading the server — both root-only — and every
-    // command that changes the app set runs after the privilege drop. Nor can
-    // the setuid binary simply be invoked again: the drop sets
-    // `PR_SET_NO_NEW_PRIVS`, which children inherit, so the setuid bit stops
-    // applying and the child comes back with `root_required`.
-    //
-    // A scheduled sweep picks this up. See `app::proxysync`.
+    // Rewriting it means writing OpenLiteSpeed's config and reloading — both
+    // root-only — and this runs after the drop. Re-invoking the setuid binary
+    // does not help either: the drop sets `PR_SET_NO_NEW_PRIVS`, which children
+    // inherit. A scheduled sweep picks the marker up.
     let _ = std::fs::write(SYNC_MARKER, b"");
 }
 

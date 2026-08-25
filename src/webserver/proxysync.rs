@@ -222,13 +222,9 @@ pub(crate) fn sync() -> Option<usize> {
 
 /// Re-reads every account's allowance from DirectAdmin and applies it.
 ///
-/// The allowance lives in DirectAdmin, where an admin can change it without the
-/// panel being involved — so a raised quota reaches an account that never opens
-/// the panel, and a lowered one takes effect without waiting for the customer
-/// to restart something.
-///
-/// Cheap enough to do on each sweep: one file read and one `systemctl
-/// set-property` per account, and only when the value actually changed.
+/// An admin can change it without the panel being involved, so a raised quota
+/// reaches an account that never opens the panel. One file read and one
+/// `systemctl set-property` per account, only when the value changed.
 fn reapply_account_limits() {
     for (state_dir, username) in crate::sys::state::list_accounts() {
         let limits = crate::limits::usage::read_da_limits(&username);

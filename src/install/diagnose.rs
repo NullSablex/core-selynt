@@ -1,12 +1,8 @@
-//! Health checks for the plugin's install.
+//! Health checks for the plugin's install: reading files, stat'ing paths,
+//! listing directories. Nothing is executed and nothing is modified.
 //!
-//! Everything here is inspection: reading files, stat'ing paths, listing
-//! directories. Nothing is executed and nothing is modified.
-//!
-//! Deliberately implemented in Rust rather than by shelling out to
-//! `scripts/diag-proxy.sh`. This binary is setuid root, so handing it a shell
-//! script to run turns any write to that file into root execution — the same
-//! class of hole the ownership hardening in the installer exists to close.
+//! In Rust rather than shelling out to a script because this binary is setuid
+//! root — handing it a script turns any write to that file into root execution.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -194,15 +190,11 @@ fn check_state_dir(r: &mut Report) {
     check_acl_support(r);
 }
 
-/// Checks that the per-account boundary is enforced by ACL rather than by mode
-/// bits.
+/// Checks that the per-account boundary is enforced by ACL, not by mode bits.
 ///
-/// The panel grants the web server access to an app's socket with
-/// `setfacl u:<web_user>:--x`, which names exactly one account. Without
-/// `setfacl` it falls back to `chmod 711`, and a mode bit cannot name anyone —
-/// traverse opens to *every* account on the server. Apps keep working either
-/// way, so nothing else surfaces this: the sockets stay `600` and unreadable by
-/// a neighbour, but the directory-level opacity is gone and nobody is told.
+/// Without `setfacl` the panel falls back to `chmod 711`, and a mode bit cannot
+/// name one account — traverse opens to every account on the server. Apps keep
+/// working either way, so nothing else surfaces it.
 fn check_acl_support(r: &mut Report) {
     let has_setfacl = ["/usr/bin/setfacl", "/bin/setfacl"]
         .iter()

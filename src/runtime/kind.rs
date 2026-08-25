@@ -1,12 +1,8 @@
-//! The set of application runtimes the panel supports, and the behaviour that
-//! differs between them.
+//! The runtimes the panel supports, and what differs between them.
 //!
-//! Runtime-specific decisions used to be `if app_type == "node"` comparisons
-//! spread across `manage`, `start` and the admin detection code. Adding a
-//! runtime meant finding every one of them, and a missed site failed silently
-//! at run time rather than at compile time. Everything that varies per runtime
-//! now hangs off this enum, so a new variant makes the compiler point at each
-//! decision that needs an answer.
+//! These decisions used to be `if app_type == "node"` scattered across the
+//! code, where a missed site failed at run time. Hanging them off this enum
+//! makes the compiler point at each one a new variant has to answer.
 
 use std::str::FromStr;
 

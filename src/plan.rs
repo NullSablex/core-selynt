@@ -128,6 +128,9 @@ pub(crate) fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // written here and left owned by root: an app shares its account's uid
         // and must not be able to forge one. A failed write means the command
         // cannot have taken effect, so it is reported instead of run.
+        // The `.app` is the only state saying *what to execute*, so it is
+        // written here and left owned by root: an app shares its account's uid
+        // and must not be able to forge one.
         Commands::Add {
             name,
             app_type,
@@ -139,36 +142,31 @@ pub(crate) fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
             node_version,
             env_vars,
         } => {
-            let args = app::commands::AddArgs {
-                name: &name,
-                app_type: app_type.as_str(),
-                cwd: cwd.as_deref(),
-                entry: &entry,
-                host: &host,
-                domain: domain.as_deref(),
-                subdomain: subdomain.as_deref(),
-                node_version: node_version.as_deref(),
-                env_vars: &env_vars,
-            };
-            if let Err((code, msg)) = app::appfile::create_for_add(&state_dir, &args, &username, gid)
+            // Built twice on purpose: `AddArgs` borrows, so it cannot outlive
+            // this arm and be captured by the closure. The fields move instead,
+            // and the closure rebuilds it on the far side of the drop.
+            macro_rules! args {
+                () => {
+                    app::commands::AddArgs {
+                        name: &name,
+                        app_type: app_type.as_str(),
+                        cwd: cwd.as_deref(),
+                        entry: &entry,
+                        host: &host,
+                        domain: domain.as_deref(),
+                        subdomain: subdomain.as_deref(),
+                        node_version: node_version.as_deref(),
+                        env_vars: &env_vars,
+                    }
+                };
+            }
+            if let Err((code, msg)) =
+                app::appfile::create_for_add(&state_dir, &args!(), &username, gid)
             {
                 sys::output::user_error(&code, &msg);
             }
             let (sd, d) = (state_dir, dbg);
-            Box::new(move || {
-                let args = app::commands::AddArgs {
-                    name: &name,
-                    app_type: app_type.as_str(),
-                    cwd: cwd.as_deref(),
-                    entry: &entry,
-                    host: &host,
-                    domain: domain.as_deref(),
-                    subdomain: subdomain.as_deref(),
-                    node_version: node_version.as_deref(),
-                    env_vars: &env_vars,
-                };
-                app::commands::cmd_add(&sd, &args, d.as_ref())
-            })
+            Box::new(move || app::commands::cmd_add(&sd, &args!(), d.as_ref()))
         }
         // The account cannot delete a root-owned file, so the prelude removes
         // it and hands over the metadata the command still needs to stop the

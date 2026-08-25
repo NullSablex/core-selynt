@@ -27,13 +27,10 @@ pub struct AppMeta {
     pub host: String,
     /// The domain and subdomain the app was created under.
     ///
-    /// Persisted in `.app` and parsed back, but deliberately not read: the
-    /// panel derives an app's address from `host`, and the domain list comes
-    /// straight from DirectAdmin. They are kept because they record what the
-    /// app was registered as — dropping them would silently rewrite that on the
-    /// next metadata write — and are scoped here rather than with a blanket
-    /// `allow` on the struct, so a field that really does fall out of use still
-    /// gets flagged.
+    /// Persisted and parsed back but never read — the panel derives an app's
+    /// address from `host`. Kept because they record what the app was
+    /// registered as, and scoped rather than allowed struct-wide so a field
+    /// that really falls out of use still gets flagged.
     #[allow(dead_code)]
     pub domain: String,
     #[allow(dead_code)]
@@ -170,13 +167,10 @@ pub(crate) fn account_is_isolated(state_dir: &Path) -> bool {
 
 /// The socket path a running app actually has, recorded when it started.
 ///
-/// Not the same as `socket_path_for` once the account's isolation mode changes:
-/// the path moves, but a running app keeps the one it was launched with. Stops
-/// and cleanups have to act on this, or they strand the real file and delete
-/// one that was never there.
-///
-/// Falls back to the configured path when nothing was recorded — an app started
-/// by an older build, or one that is not running.
+/// Not the same as `socket_path_for` once the isolation mode changes: the path
+/// moves, but a running app keeps the one it launched with. Stops and cleanups
+/// must act on this, or they strand the real file and delete one that was never
+/// there. Falls back to the configured path when nothing was recorded.
 pub(crate) fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
     let meta_file = state_dir
         .join(".run")
@@ -191,12 +185,10 @@ pub(crate) fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
 
 /// Where an app's Unix socket lives.
 ///
-/// With isolation off, it goes straight into the account's `.sockets/`, which
-/// is what the proxy has always expected. With isolation on, each app gets a
-/// subdirectory of its own: the sandbox binds only that directory into the
-/// app's mount namespace, so a sibling's socket is not merely unreadable but
-/// absent. The socket stays a real file on the host either way — the proxy has
-/// to reach it.
+/// Isolated, each app gets a subdirectory of its own: the sandbox binds only
+/// that one into the mount namespace, so a sibling's socket is absent rather
+/// than merely unreadable. It stays a real file on the host either way — the
+/// proxy has to reach it.
 pub(crate) fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
     let sockets = state_dir.join(".sockets");
     if account_is_isolated(state_dir) {
@@ -267,14 +259,12 @@ pub(crate) fn validate_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
-/// Reads the web user used for ACLs from the plugin's `etc/ols_web_user` file.
-/// Returns an empty string when unset, in which case `apply_acl` skips ACL
-/// configuration.
+/// Reads the web user used for ACLs from `etc/ols_web_user`, or an empty string
+/// when unset, in which case `apply_acl` skips ACL configuration.
 ///
-/// `SELYNT_WEB_USER` is honoured only for root, and only as a debugging escape
-/// hatch: this value decides which account ACLs are granted to, so letting an
-/// unprivileged caller of a setuid binary set it would hand them a way to open
-/// up another user's app directories.
+/// `SELYNT_WEB_USER` is honoured only for root, as a debugging escape hatch:
+/// this decides which account ACLs are granted to, so an unprivileged caller
+/// setting it could open up another user's app directories.
 pub(crate) fn get_web_user() -> String {
     if unsafe { libc::getuid() } == 0
         && let Ok(u) = std::env::var("SELYNT_WEB_USER")

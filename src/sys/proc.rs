@@ -8,12 +8,9 @@ const PROC_STAT_UTIME_OFFSET: usize = 11;
 
 /// Whether a `/proc/net/*` local address is reachable from outside the host.
 ///
-/// The address is the hex, little-endian form of the bind address. Loopback is
-/// the app talking to itself — a local cache, IPC between its own processes —
-/// and stays allowed. Anything else (`0.0.0.0`, `::`, or a real interface
-/// address) is reachable from off the machine and bypasses the panel's proxy.
-///
-/// Accepts the `addr:port` field as it appears in the file.
+/// Takes the `addr:port` field as it appears in the file, hex and
+/// little-endian. Loopback is the app talking to itself and stays allowed;
+/// anything else bypasses the panel's proxy.
 fn is_externally_bound(local_addr: &str) -> bool {
     let Some((addr, _port)) = local_addr.rsplit_once(':') else {
         return false;

@@ -93,13 +93,10 @@ pub(crate) fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Opt
 
 /// Restarts an app.
 ///
-/// The stop and the respawn both happen in the root prelude — see there for
-/// why. What is left here is the same readiness path `start` takes, so a
-/// restart is reported exactly like a start: only once the app is answering.
-///
-/// `spawned_pid` is `None` when the prelude found nothing to launch (no
-/// systemd, or the app's metadata could not be read); `cmd_start` then falls
-/// back to spawning it directly.
+/// The stop and the respawn both happen while still root — see `plan`. What is
+/// left here is the readiness path `start` takes, so a restart is reported the
+/// same way: only once the app is answering. `spawned_pid` is `None` when there
+/// was nothing to launch, and `cmd_start` then spawns it directly.
 pub(crate) fn cmd_restart(
     state_dir: &Path,
     name: &str,

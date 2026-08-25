@@ -74,14 +74,12 @@ pub(crate) fn create_for_add(
         ));
     }
 
-    // Resolve and check the working directory *before* writing anything.
+    // Check the working directory *before* writing anything.
     //
-    // `cmd_add` validates too, but it only runs after the privilege drop — by
-    // which point this function has already created the file. A rejected `cwd`
-    // therefore used to leave a root-owned `.app` behind: the command answered
-    // `cwd_outside_home`, and the app still showed up in the listing and still
-    // started, running code from wherever the caller pointed at. A
-    // world-writable directory like /tmp made that anyone's code.
+    // `cmd_add` validates too, but only after the drop — by then this has
+    // already created the file. A rejected `cwd` used to leave a root-owned
+    // `.app` behind: the command answered `cwd_outside_home`, and the app still
+    // listed and still started, running code from wherever the caller pointed.
     let home = super::super::sys::auth::lookup_home(username).ok_or_else(|| {
         (
             "invalid_cwd".to_string(),

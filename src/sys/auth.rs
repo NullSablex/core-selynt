@@ -286,14 +286,12 @@ mod tests {
         assert_eq!(p, "/usr/local/directadmin/data/users/bob/user.conf");
     }
 
-    /// The identity files live under the plugin's `etc/`, and the prefix is
-    /// part of the constant rather than of the path built from it.
+    /// The `etc/` prefix belongs to the constant, not to the path built from it.
     ///
-    /// Splitting this module once dropped the `etc/` prefix while moving the
-    /// constant. Everything still compiled and every unit test passed: the
-    /// lookup simply found no file, so `apache` and `nobody` stopped being
-    /// recognised as service accounts and the panel refused every request a
-    /// customer made — "refusing to act as". Nothing but running it caught that.
+    /// Splitting this module once dropped it. Everything compiled and every
+    /// test passed, but the lookup found no file, so `apache` and `nobody`
+    /// stopped counting as service accounts and the panel refused every
+    /// customer request. Only running it caught that.
     #[test]
     fn service_account_files_keep_the_etc_prefix() {
         for f in SERVICE_ACCOUNT_FILES {
