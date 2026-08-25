@@ -18,7 +18,7 @@ use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
 use crate::sys::auth::user_exists;
 use crate::sys::fs::{atomic_write, set_perm};
 
-use crate::cmd::with_debug;
+use crate::app::with_debug;
 
 /// Accounts the panel needs to know about, resolved from the running system.
 struct Identities {

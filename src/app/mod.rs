@@ -1,14 +1,23 @@
-mod manage;
-pub mod appfile;
-pub mod boot;
-mod start;
+//! An application's life cycle: registering it, launching it, watching it, and
+//! taking it down.
+//!
+//! * [`commands`] — what each CLI verb does, after privileges have been
+//!   dropped.
+//! * [`start`] — spawning an app and deciding it is actually up. Readiness is
+//!   the socket accepting a connection, not the process existing.
+//! * [`appfile`] — the `.app` metadata, which says *what to execute* and is
+//!   therefore written only as root and left unwritable by the account.
+//! * [`validate`] — the checks applied before an app is registered.
+//! * [`logs`] — reading and trimming what an app writes.
+//! * [`boot`] — bringing back, after a reboot, the apps that were meant to be
+//!   running.
 
-pub use manage::{
-    apply_memory_max, cmd_set_memory_max,
-    AddArgs, cmd_add, cmd_domains, cmd_list, cmd_logs, cmd_remove, cmd_restart,
-    IsolationSwitch, cmd_set_isolated, switch_isolation, cmd_set_node_version, cmd_status, cmd_status_isolated, cmd_stop,
-};
-pub use start::{cmd_start, spawn_into_scope};
+pub(crate) mod appfile;
+pub(crate) mod boot;
+pub(crate) mod commands;
+pub(crate) mod logs;
+pub(crate) mod start;
+pub(crate) mod validate;
 
 use std::path::Path;
 
@@ -33,7 +42,7 @@ pub const fn to_nix_pid(pid: u32) -> Pid {
 }
 
 /// Merges a `_debug` block into a JSON response when debug mode is on.
-pub fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
+pub(crate) fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
     if let Some(dbg) = debug {
         val["_debug"] = dbg.clone();
     }
@@ -51,7 +60,7 @@ pub fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
 /// setuid root, and that path is the file the installer owns and verifies.
 ///
 /// Returns whether the app started.
-pub fn start_app_detached(username: &str, name: &str) -> bool {
+pub(crate) fn start_app_detached(username: &str, name: &str) -> bool {
     std::process::Command::new(format!("{}/bin/core-selynt", crate::sys::state::PLUGIN_PATH))
         .arg("start")
         .arg(name)
@@ -64,7 +73,7 @@ pub fn start_app_detached(username: &str, name: &str) -> bool {
 
 /// Determines `(status, pid, started_at)` for an app, validating the PID
 /// against `/proc/{pid}/status` (UID match) and `.meta` (anti-PID-reuse).
-pub fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, Option<u64>) {
+pub(crate) fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, Option<u64>) {
     let pid_file = state_dir.join(".run").join(format!("{name}.pid"));
     let meta_file = state_dir.join(".run").join(format!("{name}.meta"));
 
@@ -95,7 +104,7 @@ pub fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, Option<
 
 /// Lightweight status check used by the admin command. Skips UID matching
 /// because admin reads other users' state dirs as root before the drop.
-pub fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u32>, Option<u64>) {
+pub(crate) fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u32>, Option<u64>) {
     let Ok(pid_str) = std::fs::read_to_string(pid_file) else {
         return ("STOPPED".to_string(), None, None);
     };
@@ -114,7 +123,7 @@ pub fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u3
 
 /// Touches the sync marker file so the cron sync job knows to re-render the
 /// proxy config on its next minute tick.
-pub fn signal_sync() {
+pub(crate) fn signal_sync() {
     // Records that the proxy config no longer matches the live apps.
     //
     // It cannot be rewritten from here. Doing so means writing OpenLiteSpeed's
@@ -124,19 +133,19 @@ pub fn signal_sync() {
     // `PR_SET_NO_NEW_PRIVS`, which children inherit, so the setuid bit stops
     // applying and the child comes back with `root_required`.
     //
-    // A scheduled sweep picks this up. See `cmd::proxysync`.
+    // A scheduled sweep picks this up. See `app::proxysync`.
     let _ = std::fs::write(SYNC_MARKER, b"");
 }
 
 /// Validates that a value cannot escape its containing directory: no `/`,
 /// no `..`, no null bytes, and not empty.
-pub fn validate_safe_component(s: &str) -> bool {
+pub(crate) fn validate_safe_component(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\0') && !s.contains("..")
 }
 
 /// Stops a process without exiting. Used by `remove` and `restart` to share
 /// the SIGTERM→poll→SIGKILL sequence with the user-facing `stop` command.
-pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs: u64) {
+pub(crate) fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs: u64) {
     let (status, pid_opt, _) = get_status(state_dir, name);
     if status == "STOPPED" {
         return;
@@ -178,4 +187,18 @@ pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs:
     let _ = std::fs::remove_file(crate::sys::state::active_socket_path(state_dir, meta));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.pid")));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.meta")));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_safe_component;
+
+    #[test]
+    fn validate_safe_component_blocks_traversal() {
+        assert!(validate_safe_component("index.js"));
+        assert!(!validate_safe_component("../etc/passwd"));
+        assert!(!validate_safe_component("a/b"));
+        assert!(!validate_safe_component(""));
+        assert!(!validate_safe_component("a\0b"));
+    }
 }

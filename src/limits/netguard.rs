@@ -20,7 +20,7 @@ use crate::sys::output::debug;
 use crate::sys::proc::{has_external_listen, is_process_alive};
 use crate::sys::state::{AppMeta, list_app_names, load_app_meta};
 
-use crate::cmd::to_nix_pid;
+use crate::app::to_nix_pid;
 
 /// Grace period for the app to shut down before it is killed.
 const STOP_TIMEOUT_SECS: u64 = 5;
@@ -127,7 +127,7 @@ fn stop_offending_app(
         let _ = std::fs::remove_file(run.join(format!("{name}.enabled")));
     }
 
-    crate::cmd::signal_sync();
+    crate::app::signal_sync();
 }
 
 /// Sweeps every account on the server.
@@ -149,7 +149,7 @@ pub(crate) fn sweep_all_accounts() -> Vec<String> {
 /// outcome reaches here.
 pub(crate) fn report(stopped: Option<Vec<String>>, dbg: Option<&Value>) -> ! {
     let stopped = stopped.unwrap_or_default();
-    crate::sys::output::success(crate::cmd::with_debug(
+    crate::sys::output::success(crate::app::with_debug(
         json!({
             "stopped": stopped.len(),
             "apps": stopped,

@@ -1,5 +1,5 @@
 mod admin;
-mod cmd;
+mod app;
 mod install;
 mod limits;
 mod runtime;
@@ -269,7 +269,7 @@ fn run_server_wide(command: ServerWide, debug: bool) -> ! {
     let dbg = debug.then(|| json!({ "scope": "server" }));
 
     match command {
-        ServerWide::BootRecover => cmd::boot::cmd_boot_recover(cmd::boot::recover_all(), dbg.as_ref()),
+        ServerWide::BootRecover => app::boot::cmd_boot_recover(app::boot::recover_all(), dbg.as_ref()),
         ServerWide::NetguardAll => {
             limits::netguard::report(Some(limits::netguard::sweep_all_accounts()), dbg.as_ref())
         }
@@ -420,7 +420,7 @@ struct RootPrelude {
     removed_meta: Option<AppMeta>,
     /// Apps restarted to apply a change of isolation mode, and those that
     /// failed to come back up.
-    isolation_switch: Option<Result<cmd::IsolationSwitch, (String, String)>>,
+    isolation_switch: Option<Result<app::commands::IsolationSwitch, (String, String)>>,
 }
 
 /// Whether this command needs the account's DirectAdmin allowance read.
@@ -484,7 +484,7 @@ fn run_root_prelude(
     // would leave the app on its old, larger ceiling. `systemctl set-property`
     // needs root, hence here.
     if let Commands::SetMemoryMax { name, megabytes } = command {
-        cmd::apply_memory_max(state_dir, name, *megabytes, uid, gid);
+        app::commands::apply_memory_max(state_dir, name, *megabytes, uid, gid);
         limits::usage::ensure_slice_cap(username, da_limits.memory_max);
         limits::usage::reapply_app_limits(state_dir, username);
     }
@@ -502,7 +502,7 @@ fn run_root_prelude(
     // launched, so the running apps are restarted here to make the setting take
     // effect immediately — recreating their systemd scopes needs root.
     let isolation_switch = if let Commands::SetIsolated { isolated } = command {
-        Some(cmd::switch_isolation(state_dir, username, *isolated))
+        Some(app::commands::switch_isolation(state_dir, username, *isolated))
     } else {
         None
     };
@@ -513,7 +513,7 @@ fn run_root_prelude(
     let removed_meta = if let Commands::Remove { name, .. } = command {
         let meta = load_app_meta(state_dir, name).ok();
         if meta.is_some() {
-            cmd::appfile::remove(state_dir, name);
+            app::appfile::remove(state_dir, name);
         }
         meta
     } else {
@@ -535,9 +535,9 @@ fn run_root_prelude(
             subdomain,
             node_version,
             env_vars,
-        } => Some(cmd::appfile::create_for_add(
+        } => Some(app::appfile::create_for_add(
             state_dir,
-            &cmd::AddArgs {
+            &app::commands::AddArgs {
                 name,
                 app_type: app_type.as_str(),
                 cwd: cwd.as_deref(),
@@ -550,7 +550,7 @@ fn run_root_prelude(
             },
             gid,
         )),
-        Commands::SetNodeVersion { name, node_version } => Some(cmd::appfile::update_key(
+        Commands::SetNodeVersion { name, node_version } => Some(app::appfile::update_key(
             state_dir,
             name,
             "node_version",
@@ -599,7 +599,7 @@ fn run_root_prelude(
         if let Err(e) = init_app_logs_dir(&cwd, uid, gid) {
             sys::output::debug(format!("init_app_logs_dir: {e:#}"));
         }
-        spawned_pid = cmd::spawn_into_scope(&meta, name, state_dir, username, uid, gid);
+        spawned_pid = app::start::spawn_into_scope(&meta, name, state_dir, username, uid, gid);
         // The first app of an account creates the slice, so the call above had
         // nothing to configure. Now it exists.
         if spawned_pid.is_some() {
@@ -687,8 +687,8 @@ fn dispatch(
     }
 
     match command {
-        Commands::List => cmd::cmd_list(state_dir, dbg),
-        Commands::Status { name } => cmd::cmd_status(state_dir, &name, dbg),
+        Commands::List => app::commands::cmd_list(state_dir, dbg),
+        Commands::Status { name } => app::commands::cmd_status(state_dir, &name, dbg),
         Commands::Stats { name } => limits::usage::cmd_stats(state_dir, &name, username, prelude.da_limits, dbg),
         Commands::Netguard { .. } => limits::netguard::report(prelude.netguard_stopped, dbg),
         // Handled before the privilege drop, in `run_server_wide`; the match
@@ -697,20 +697,20 @@ fn dispatch(
             "internal",
             "server-wide commands run before the privilege drop",
         ),
-        Commands::StatusIsolated => cmd::cmd_status_isolated(state_dir, dbg),
+        Commands::StatusIsolated => app::commands::cmd_status_isolated(state_dir, dbg),
         Commands::SetIsolated { isolated } => match prelude.isolation_switch {
-            Some(Ok(switch)) => cmd::cmd_set_isolated(isolated, switch, dbg),
+            Some(Ok(switch)) => app::commands::cmd_set_isolated(isolated, switch, dbg),
             Some(Err((code, msg))) => sys::output::user_error(&code, &msg),
             None => sys::output::system_error("internal", "isolation switch result missing"),
         },
         Commands::SetMemoryMax { name, megabytes } => {
-            cmd::cmd_set_memory_max(state_dir, &name, megabytes, dbg)
+            app::commands::cmd_set_memory_max(state_dir, &name, megabytes, dbg)
         }
         Commands::Start { name } => {
-            cmd::cmd_start(state_dir, &name, username, web_user, prelude.spawned_pid, dbg)
+            app::start::cmd_start(state_dir, &name, username, web_user, prelude.spawned_pid, dbg)
         }
-        Commands::Stop { name, timeout } => cmd::cmd_stop(state_dir, &name, timeout, dbg),
-        Commands::Restart { name } => cmd::cmd_restart(
+        Commands::Stop { name, timeout } => app::commands::cmd_stop(state_dir, &name, timeout, dbg),
+        Commands::Restart { name } => app::commands::cmd_restart(
             state_dir,
             &name,
             username,
@@ -728,9 +728,9 @@ fn dispatch(
             subdomain,
             node_version,
             env_vars,
-        } => cmd::cmd_add(
+        } => app::commands::cmd_add(
             state_dir,
-            &cmd::AddArgs {
+            &app::commands::AddArgs {
                 name: &name,
                 app_type: app_type.as_str(),
                 cwd: cwd.as_deref(),
@@ -743,16 +743,16 @@ fn dispatch(
             },
             dbg,
         ),
-        Commands::Remove { name, delete_dir } => cmd::cmd_remove(state_dir, &name, delete_dir, prelude.removed_meta, dbg),
+        Commands::Remove { name, delete_dir } => app::commands::cmd_remove(state_dir, &name, delete_dir, prelude.removed_meta, dbg),
         Commands::SetNodeVersion { name, node_version } => {
-            cmd::cmd_set_node_version(state_dir, &name, &node_version, dbg)
+            app::commands::cmd_set_node_version(state_dir, &name, &node_version, dbg)
         }
         Commands::Logs {
             name,
             lines,
             stderr,
-        } => cmd::cmd_logs(state_dir, &name, lines, stderr, dbg),
-        Commands::Domains { .. } => cmd::cmd_domains(prelude.domains, dbg),
+        } => app::commands::cmd_logs(state_dir, &name, lines, stderr, dbg),
+        Commands::Domains { .. } => app::commands::cmd_domains(prelude.domains, dbg),
         Commands::SetLocale { .. } => emit_prelude_result(
             prelude.set_locale,
             "set_locale result missing for SetLocale",

@@ -22,7 +22,7 @@ use crate::sys::state::SYNC_MARKER;
 
 use super::ols;
 
-use crate::cmd::with_debug;
+use crate::app::with_debug;
 
 const LOCK_FILE: &str = "/var/lib/selynt_panel/.sync.lock";
 

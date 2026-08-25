@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::sys::output::{success, user_error};
 use crate::sys::state::{DA_USERS_BASE, load_app_meta};
 
-use crate::cmd::{get_status, with_debug};
+use crate::app::{get_status, with_debug};
 
 /// cgroup v2 path for an app's scope.
 ///

@@ -7,7 +7,7 @@ use crate::sys::output::success;
 use crate::sys::state::PLUGIN_PATH;
 
 use crate::runtime::detect::detect_node_versions;
-use crate::cmd::{admin_get_status, with_debug};
+use crate::app::{admin_get_status, with_debug};
 
 
 pub(crate) fn cmd_admin_list(apps: &[Value], dbg: Option<&Value>) -> ! {

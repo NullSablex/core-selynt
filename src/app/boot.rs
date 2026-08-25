@@ -62,7 +62,7 @@ fn already_running(run_dir: &Path, name: &str) -> bool {
 /// Restarts every enabled app of every account.
 ///
 /// Returns the apps it started, as `user/name`.
-pub fn recover_all() -> Vec<String> {
+pub(crate) fn recover_all() -> Vec<String> {
     log(&format!("boot-recover: scanning {STATE_BASE}"));
     let mut started = Vec::new();
 
@@ -93,7 +93,7 @@ pub fn recover_all() -> Vec<String> {
 }
 
 /// CLI entry point.
-pub fn cmd_boot_recover(started: Vec<String>, dbg: Option<&Value>) -> ! {
+pub(crate) fn cmd_boot_recover(started: Vec<String>, dbg: Option<&Value>) -> ! {
     success(with_debug(
         json!({ "started": started.len(), "apps": started }),
         dbg,

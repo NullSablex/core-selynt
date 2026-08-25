@@ -1,6 +1,6 @@
 //! Undoes what `setup` put in place.
 //!
-//! The mirror of `cmd::setup` and `cmd::ols`: the same files, the same markers,
+//! The mirror of `app::setup` and `app::ols`: the same files, the same markers,
 //! the same web server. Keeping both halves in one language means the block a
 //! template gained is removed by code that knows how it was written, rather
 //! than by a second implementation that has to guess.
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::sys::output::success;
 use crate::sys::state::{DA_TEMPLATES, STATE_BASE};
 
-use crate::cmd::with_debug;
+use crate::app::with_debug;
 
 /// Stops every app of every account, and everything each one spawned.
 ///

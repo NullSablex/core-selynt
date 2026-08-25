@@ -17,7 +17,7 @@ use crate::sys::proc::{
 use crate::sys::state::{AppMeta, PLUGIN_PATH, load_app_meta, socket_path_for};
 use crate::sys::fs::{atomic_write, set_perm};
 
-use super::manage::rotate_log_if_needed;
+use super::logs::rotate_log_if_needed;
 use crate::runtime::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
 use super::{get_status, signal_sync, to_nix_pid, validate_safe_component, with_debug};
 
@@ -66,7 +66,7 @@ fn app_has_external_port(username: &str, name: &str, pid: u32) -> bool {
     has_external_listen(&pids)
 }
 
-pub fn cmd_start(
+pub(crate) fn cmd_start(
     state_dir: &Path,
     name: &str,
     username: &str,
@@ -170,7 +170,7 @@ pub fn cmd_start(
 ///
 /// Returns `None` when systemd is unavailable, leaving `cmd_start` to spawn the
 /// app the ordinary way after the drop.
-pub fn spawn_into_scope(
+pub(crate) fn spawn_into_scope(
     meta: &AppMeta,
     name: &str,
     state_dir: &Path,
