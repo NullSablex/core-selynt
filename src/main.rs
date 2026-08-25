@@ -9,12 +9,13 @@ use serde_json::json;
 
 use std::path::{Path, PathBuf};
 
+use cmd::runtime::Runtime;
 use output::system_error;
 use state::{
+    AppMeta, STATE_BASE,
     DA_USERS_BASE, drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user,
 };
 
-const STATE_BASE: &str = "/var/lib/selynt_panel";
 
 #[derive(Parser)]
 #[command(
@@ -106,6 +107,55 @@ enum Commands {
     /// Reports CPU and memory usage of an app, with the account's limits.
     Stats { name: String },
 
+    /// Restarts every enabled app of every account, after a reboot.
+    ///
+    /// Runs as root from `selynt-panel.service`; not meant to be called by
+    /// hand. Apps the user stopped carry no marker and stay stopped.
+    BootRecover,
+
+    /// Removes everything the plugin installed.
+    ///
+    /// Stops every app, strips the vhost templates and cleans the web server's
+    /// configuration. Run by the uninstaller.
+    Teardown,
+
+    /// Prepares everything the plugin needs to run.
+    ///
+    /// Records which accounts DirectAdmin uses, creates the state directory and
+    /// wires the panel into OpenLiteSpeed. Run by the installer; safe to re-run.
+    Setup,
+
+    /// Regenerates the web server's proxy handlers for every live app.
+    ///
+    /// Runs as root from cron; not meant to be called by hand.
+    SyncProxy,
+
+    /// Reports whether this account isolates its apps.
+    StatusIsolated,
+
+    /// Isolates this account's apps from each other, or restores the default.
+    ///
+    /// Applies to the account as a whole: isolating a single app would not
+    /// protect it, since a non-isolated sibling shares its uid. Takes effect as
+    /// each app is restarted.
+    SetIsolated {
+        /// `true` isolates, `false` restores the shared default.
+        #[arg(long, action = clap::ArgAction::Set)]
+        isolated: bool,
+    },
+
+    /// Stops any of the account's apps bound to an externally reachable port.
+    ///
+    /// The start-time check only sees the app's own process; this covers every
+    /// process in the app's cgroup, so a port opened later — or by a child that
+    /// never went through the Node loader — is caught too. Loopback is allowed.
+    Netguard {
+        /// Sweep every account instead of just the caller's. Used by the timer,
+        /// and restricted to root and the panel's web user.
+        #[arg(long)]
+        all_accounts: bool,
+    },
+
     /// Sets the memory cap of an app. `0` (or empty) restores "auto".
     SetMemoryMax {
         name: String,
@@ -144,6 +194,14 @@ enum AdminCommands {
     DetectNodes,
     /// Persists the Node.js runtimes selected by detection index.
     SaveNodeVersions { indices: Vec<usize> },
+    /// Sets whether newly created apps start isolated from their siblings.
+    SaveDefaultIsolated {
+        /// `true` makes isolation the default for new accounts.
+        #[arg(long, action = clap::ArgAction::Set)]
+        isolated: bool,
+    },
+    /// Runs the proxy-stack diagnostic and returns its report.
+    Diagnose,
     /// Persists the plugin-wide default panel language.
     SetLocale {
         /// Locale code (e.g. `pt-br`, `en`). Empty clears the default.
@@ -151,6 +209,9 @@ enum AdminCommands {
     },
 }
 
+/// CLI surface for [`Runtime`]. Kept separate so clap's derive stays out of the
+/// runtime definition itself; `as_str` is the single source of truth for the
+/// identifier that reaches metadata.
 #[derive(Clone, ValueEnum)]
 enum AppType {
     Node,
@@ -158,11 +219,63 @@ enum AppType {
 }
 
 impl AppType {
-    const fn as_str(&self) -> &'static str {
+    const fn runtime(&self) -> Runtime {
         match self {
-            Self::Node => "node",
-            Self::Rust => "rust",
+            Self::Node => Runtime::Node,
+            Self::Rust => Runtime::Rust,
         }
+    }
+
+    const fn as_str(&self) -> &'static str {
+        self.runtime().as_str()
+    }
+}
+
+/// Maintenance that covers the whole server rather than one account.
+#[derive(Clone, Copy)]
+enum ServerWide {
+    /// Bring back apps that were running before the last reboot.
+    BootRecover,
+    /// Stop apps of any account bound to an externally reachable port.
+    NetguardAll,
+    /// Rewrite the web server's proxy handlers from the live apps.
+    SyncProxy,
+    /// Record the accounts, prepare the state directory and wire up the proxy.
+    Setup,
+    /// Stop every app and undo the server-side configuration.
+    Teardown,
+}
+
+/// Classifies a command as server-wide, if it is one.
+const fn server_wide_command(command: &Commands) -> Option<ServerWide> {
+    match command {
+        Commands::BootRecover => Some(ServerWide::BootRecover),
+        Commands::Netguard { all_accounts: true } => Some(ServerWide::NetguardAll),
+        Commands::SyncProxy => Some(ServerWide::SyncProxy),
+        Commands::Setup => Some(ServerWide::Setup),
+        Commands::Teardown => Some(ServerWide::Teardown),
+        _ => None,
+    }
+}
+
+/// Runs server-wide maintenance and exits.
+///
+/// Stays root throughout: the work spans every account, so there is no single
+/// identity to drop to. Each app it starts goes through its own invocation of
+/// the binary, which drops to that app's account as usual.
+fn run_server_wide(command: ServerWide, debug: bool) -> ! {
+    // Not `build_debug_base`: its fields describe the account being acted on,
+    // and there is none here. Reporting the scope is the honest equivalent.
+    let dbg = debug.then(|| json!({ "scope": "server" }));
+
+    match command {
+        ServerWide::BootRecover => cmd::boot::cmd_boot_recover(cmd::boot::recover_all(), dbg.as_ref()),
+        ServerWide::NetguardAll => {
+            cmd::netguard::report(Some(cmd::netguard::sweep_all_accounts()), dbg.as_ref())
+        }
+        ServerWide::SyncProxy => cmd::proxysync::cmd_sync_proxy(dbg.as_ref()),
+        ServerWide::Setup => cmd::setup::cmd_setup(dbg.as_ref()),
+        ServerWide::Teardown => cmd::teardown::cmd_teardown(dbg.as_ref()),
     }
 }
 
@@ -171,6 +284,46 @@ fn main() {
 
     if !nix::unistd::geteuid().is_root() {
         system_error("root_required", "core_selynt must be setuid root (euid=0)");
+    }
+
+    // Server-wide maintenance has no target account: it sweeps every one of
+    // them. Handling it before `resolve_target_user` keeps `USERNAME` out of
+    // the picture entirely — there is no account to name, and demanding one
+    // would be asking for a value the answer does not depend on.
+    if let Some(command) = server_wide_command(&cli.command) {
+        // Three levels, not two.
+        //
+        // `SyncProxy` is how an ordinary command tells the panel that the
+        // routing no longer matches the live apps, and it is invoked by the
+        // panel itself after the privilege drop. It reads only state the panel
+        // wrote and rewrites a file derived entirely from it, so any account may
+        // ask for it.
+        //
+        // `Setup` and `Teardown` change the installation itself — they stop
+        // every app, rewrite DirectAdmin's templates and reconfigure the web
+        // server. The web server's own account is trusted to act on behalf of a
+        // customer, which is what serving the panel needs, but not to take the
+        // panel apart: otherwise anything that reached that account could
+        // uninstall it.
+        //
+        // The rest is server-wide maintenance the panel triggers for itself.
+        let allowed = match command {
+            ServerWide::SyncProxy => true,
+            ServerWide::Setup | ServerWide::Teardown => state::caller_is_root(),
+            _ => state::caller_is_privileged(),
+        };
+        if !allowed {
+            let (code, message) = if matches!(command, ServerWide::Setup | ServerWide::Teardown) {
+                ("root_required", "installing or removing the plugin requires root")
+            } else {
+                (
+                    "admin_required",
+                    "server-wide maintenance requires root or the panel web user",
+                )
+            };
+            system_error(code, message);
+        }
+        run_server_wide(command, cli.debug);
     }
 
     let (uid, gid, home, username) = match resolve_target_user() {
@@ -243,6 +396,9 @@ fn resolve_state_dir(username: &str) -> PathBuf {
 /// the files involved are owned by `diradmin` or live in directories the real
 /// user cannot traverse.
 struct RootPrelude {
+    /// Diagnostic report — the script reads DirectAdmin and OpenLiteSpeed
+    /// files that only root can reach.
+    diagnostic: Option<Result<serde_json::Value, (String, String)>>,
     /// Account resource limits from DirectAdmin's `user.conf`, which lives in a
     /// `diradmin`-owned `0700` directory and is unreadable after the drop.
     da_limits: cmd::DaLimits,
@@ -254,6 +410,16 @@ struct RootPrelude {
     admin_apps: Vec<serde_json::Value>,
     save_node_versions: Option<Result<serde_json::Value, (String, String)>>,
     set_locale: Option<Result<serde_json::Value, (String, String)>>,
+    /// Apps stopped by the network sweep: it signals the account's processes,
+    /// so it has to run before the drop.
+    netguard_stopped: Option<Vec<String>>,
+    /// Outcome of writing an app's `.app` metadata, which only root may do.
+    app_file_result: Option<Result<(), (String, String)>>,
+    /// Metadata of an app being removed. The `.app` is root-owned, so the
+    /// prelude deletes it and passes what it held to the command.
+    removed_meta: Option<AppMeta>,
+    /// Apps restarted to apply a change of isolation mode.
+    isolation_switch: Option<Result<Vec<String>, (String, String)>>,
 }
 
 fn run_root_prelude(
@@ -278,8 +444,19 @@ fn run_root_prelude(
             | Commands::Stop { .. }
             | Commands::Remove { .. }
             | Commands::SetMemoryMax { .. }
+            | Commands::List
+            | Commands::Status { .. }
     ) {
-        cmd::read_da_limits(username)
+        let limits = cmd::read_da_limits(username);
+
+        // Re-apply on every command that reads them, not only on the ones that
+        // change an app. The account's allowance lives in DirectAdmin and an
+        // admin can raise or lower it at any time; without this the account
+        // stays on whatever ceiling was in force the last time it happened to
+        // start or stop something — a raised quota never arriving, and a
+        // lowered one never taking effect.
+        cmd::ensure_slice_cap(username, limits.memory_max);
+        limits
     } else {
         cmd::DaLimits::default()
     };
@@ -300,6 +477,87 @@ fn run_root_prelude(
     if let Commands::Stop { name, .. } | Commands::Remove { name, .. } = command {
         cmd::ensure_slice_cap(username, da_limits.memory_max);
         cmd::reapply_app_limits_excluding(state_dir, username, name);
+    }
+
+    // Switching isolation moves each app's socket and changes how it is
+    // launched, so the running apps are restarted here to make the setting take
+    // effect immediately — recreating their systemd scopes needs root.
+    let isolation_switch = if let Commands::SetIsolated { isolated } = command {
+        Some(cmd::switch_isolation(state_dir, username, *isolated))
+    } else {
+        None
+    };
+
+    // Removal needs root as well: the account cannot delete a root-owned file.
+    // The metadata is read first and handed over, since the command still needs
+    // it to stop the app and clean up.
+    let removed_meta = if let Commands::Remove { name, .. } = command {
+        let meta = load_app_meta(state_dir, name).ok();
+        if meta.is_some() {
+            cmd::appfile::remove(state_dir, name);
+        }
+        meta
+    } else {
+        None
+    };
+
+    // The `.app` file is the only state that says what to execute, so it is
+    // written here and left owned by root: an app sharing its account's uid
+    // must not be able to forge one and have the panel launch it. Everything
+    // else under `.run` is observable state the account may write.
+    let app_file_result = match command {
+        Commands::Add {
+            name,
+            app_type,
+            cwd,
+            entry,
+            host,
+            domain,
+            subdomain,
+            node_version,
+            env_vars,
+        } => Some(cmd::appfile::create_for_add(
+            state_dir,
+            &cmd::AddArgs {
+                name,
+                app_type: app_type.as_str(),
+                cwd: cwd.as_deref(),
+                entry,
+                host,
+                domain: domain.as_deref(),
+                subdomain: subdomain.as_deref(),
+                node_version: node_version.as_deref(),
+                env_vars,
+            },
+            gid,
+        )),
+        Commands::SetNodeVersion { name, node_version } => Some(cmd::appfile::update_key(
+            state_dir,
+            name,
+            "node_version",
+            node_version,
+            gid,
+        )),
+        _ => None,
+    };
+
+    // Stopping an offending app means signalling processes owned by the
+    // account, so the sweep runs here, before the drop. The result is reported
+    // by the dispatcher below, which is where the debug payload lives.
+    let netguard_stopped = if matches!(command, Commands::Netguard { .. }) {
+        Some(cmd::netguard::sweep_account(state_dir, username))
+    } else {
+        None
+    };
+
+    // `Restart` re-opens the log files after the drop, so their ownership has to
+    // be right for it too — and only root can fix it. It does not go through the
+    // scope-spawning path below, which is why this is separate.
+    if let Commands::Restart { name } = command
+        && let Ok(meta) = load_app_meta(state_dir, name)
+        && let Err(e) = init_app_logs_dir(&PathBuf::from(&meta.cwd), uid, gid)
+    {
+        output::debug(format!("init_app_logs_dir: {e:#}"));
     }
 
     let mut spawned_pid = None;
@@ -335,11 +593,29 @@ fn run_root_prelude(
         Vec::new()
     };
 
+    let diagnostic = if matches!(
+        command,
+        Commands::Admin {
+            command: AdminCommands::Diagnose
+        }
+    ) {
+        Some(cmd::run_diagnostic())
+    } else {
+        None
+    };
+
+    // Both write into the plugin's `etc/`, which only root can touch, and only
+    // one of them can be the running command.
     let save_node_versions = if let Commands::Admin {
         command: AdminCommands::SaveNodeVersions { indices },
     } = command
     {
         Some(cmd::save_node_versions(indices))
+    } else if let Commands::Admin {
+        command: AdminCommands::SaveDefaultIsolated { isolated },
+    } = command
+    {
+        Some(cmd::save_default_isolated(*isolated))
     } else {
         None
     };
@@ -357,12 +633,17 @@ fn run_root_prelude(
     };
 
     RootPrelude {
+        diagnostic,
         da_limits,
         spawned_pid,
         domains,
         admin_apps,
         save_node_versions,
         set_locale,
+        netguard_stopped,
+        app_file_result,
+        removed_meta,
+        isolation_switch,
     }
 }
 
@@ -374,10 +655,29 @@ fn dispatch(
     prelude: RootPrelude,
     dbg: Option<&serde_json::Value>,
 ) -> ! {
+    // A failed `.app` write means the command cannot have taken effect; report
+    // it instead of running the rest as if the metadata were there.
+    if let Some(Err((code, msg))) = prelude.app_file_result {
+        output::user_error(&code, &msg);
+    }
+
     match command {
         Commands::List => cmd::cmd_list(state_dir, dbg),
         Commands::Status { name } => cmd::cmd_status(state_dir, &name, dbg),
         Commands::Stats { name } => cmd::cmd_stats(state_dir, &name, username, prelude.da_limits, dbg),
+        Commands::Netguard { .. } => cmd::netguard::report(prelude.netguard_stopped, dbg),
+        // Handled before the privilege drop, in `run_server_wide`; the match
+        // has to name it even though it never arrives here.
+        Commands::BootRecover | Commands::SyncProxy | Commands::Setup | Commands::Teardown => output::system_error(
+            "internal",
+            "server-wide commands run before the privilege drop",
+        ),
+        Commands::StatusIsolated => cmd::cmd_status_isolated(state_dir, dbg),
+        Commands::SetIsolated { isolated } => match prelude.isolation_switch {
+            Some(Ok(restarted)) => cmd::cmd_set_isolated(isolated, restarted, dbg),
+            Some(Err((code, msg))) => output::user_error(&code, &msg),
+            None => output::system_error("internal", "isolation switch result missing"),
+        },
         Commands::SetMemoryMax { name, megabytes } => {
             cmd::cmd_set_memory_max(state_dir, &name, megabytes, dbg)
         }
@@ -411,7 +711,7 @@ fn dispatch(
             },
             dbg,
         ),
-        Commands::Remove { name, delete_dir } => cmd::cmd_remove(state_dir, &name, delete_dir, dbg),
+        Commands::Remove { name, delete_dir } => cmd::cmd_remove(state_dir, &name, delete_dir, prelude.removed_meta, dbg),
         Commands::SetNodeVersion { name, node_version } => {
             cmd::cmd_set_node_version(state_dir, &name, &node_version, dbg)
         }
@@ -439,6 +739,9 @@ fn dispatch(
             command: AdminCommands::List,
         } => cmd::cmd_admin_list(&prelude.admin_apps, dbg),
         Commands::Admin {
+            command: AdminCommands::Diagnose,
+        } => emit_prelude_result(prelude.diagnostic, "diagnostic result missing", dbg),
+        Commands::Admin {
             command: AdminCommands::DetectNodes,
         } => cmd::cmd_admin_detect_nodes(dbg),
         Commands::Admin {
@@ -446,6 +749,13 @@ fn dispatch(
         } => emit_prelude_result(
             prelude.save_node_versions,
             "save_node_versions result missing for SaveNodeVersions",
+            dbg,
+        ),
+        Commands::Admin {
+            command: AdminCommands::SaveDefaultIsolated { .. },
+        } => emit_prelude_result(
+            prelude.save_node_versions,
+            "result missing for SaveDefaultIsolated",
             dbg,
         ),
         Commands::Admin {

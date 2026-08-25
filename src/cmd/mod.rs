@@ -1,17 +1,31 @@
 mod admin;
 mod locale;
 mod manage;
+mod diagnose;
+pub use diagnose::run_diagnostic;
 mod memory;
 mod node;
+pub mod appfile;
+pub mod boot;
+pub mod netguard;
+pub mod ols;
+pub mod proxysync;
+pub mod runtime;
+pub mod setup;
+pub mod teardown;
+pub mod units;
+pub mod sandbox;
 mod start;
 pub(crate) mod stats;
 
-pub use admin::{cmd_admin_detect_nodes, cmd_admin_list, collect_admin_list, save_node_versions};
+pub use admin::{
+    cmd_admin_detect_nodes, cmd_admin_list, collect_admin_list, save_default_isolated, save_node_versions,
+};
 pub use locale::{set_locale_global, set_locale_user};
 pub use manage::{
     apply_memory_max, cmd_set_memory_max,
     AddArgs, cmd_add, cmd_domains, cmd_list, cmd_logs, cmd_remove, cmd_restart,
-    cmd_set_node_version, cmd_status, cmd_stop,
+    cmd_set_isolated, switch_isolation, cmd_set_node_version, cmd_status, cmd_status_isolated, cmd_stop,
 };
 pub use start::{cmd_start, spawn_into_scope};
 pub use stats::{
@@ -21,6 +35,7 @@ pub use stats::{
 };
 
 use std::path::Path;
+
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
@@ -28,7 +43,7 @@ use nix::unistd::Pid;
 use serde_json::Value;
 
 use crate::proc::{is_process_alive, read_proc_starttime, read_proc_uid};
-use crate::state::{AppMeta, parse_kv};
+use crate::state::{AppMeta, SYNC_MARKER, parse_kv};
 
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -46,6 +61,28 @@ pub fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
         val["_debug"] = dbg.clone();
     }
     val
+}
+
+/// Starts one app by invoking the installed binary again, as `username`.
+///
+/// `cmd_start` does more than spawn — it persists the pid, waits for the socket
+/// and applies the ACL — and it ends the process when done, so it cannot simply
+/// be called in a loop. Running it as a child also keeps one app's failure from
+/// ending a sweep over many.
+///
+/// The installed path is used rather than `/proc/self/exe`: this binary is
+/// setuid root, and that path is the file the installer owns and verifies.
+///
+/// Returns whether the app started.
+pub fn start_app_detached(username: &str, name: &str) -> bool {
+    std::process::Command::new(format!("{}/bin/core-selynt", crate::state::PLUGIN_PATH))
+        .arg("start")
+        .arg(name)
+        .env("USERNAME", username)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Determines `(status, pid, started_at)` for an app, validating the PID
@@ -101,7 +138,17 @@ pub fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u3
 /// Touches the sync marker file so the cron sync job knows to re-render the
 /// proxy config on its next minute tick.
 pub fn signal_sync() {
-    let _ = std::fs::write("/var/lib/selynt_panel/.sync_needed", b"");
+    // Records that the proxy config no longer matches the live apps.
+    //
+    // It cannot be rewritten from here. Doing so means writing OpenLiteSpeed's
+    // configuration and reloading the server — both root-only — and every
+    // command that changes the app set runs after the privilege drop. Nor can
+    // the setuid binary simply be invoked again: the drop sets
+    // `PR_SET_NO_NEW_PRIVS`, which children inherit, so the setuid bit stops
+    // applying and the child comes back with `root_required`.
+    //
+    // A scheduled sweep picks this up. See `cmd::proxysync`.
+    let _ = std::fs::write(SYNC_MARKER, b"");
 }
 
 /// Validates that a value cannot escape its containing directory: no `/`,
@@ -120,26 +167,38 @@ pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs:
     let Some(pid) = pid_opt else { return };
     let nix_pid = to_nix_pid(pid);
 
+    // An isolated app is launched through bwrap, and the pid the panel tracks
+    // is bwrap's. It does not forward signals, so terminating only that pid
+    // leaves the real process orphaned — still holding its socket. Collect the
+    // descendants up front, while the parent links still exist.
+    let descendants = crate::proc::descendants_of(pid);
+
     // Remove the marker first so the proxy stops routing before we kill.
     let marker = state_dir.join(".proxy").join(&meta.host);
     let _ = std::fs::remove_file(&marker);
 
     let _ = kill(nix_pid, Signal::SIGTERM);
+    for &d in &descendants {
+        let _ = kill(to_nix_pid(d), Signal::SIGTERM);
+    }
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         std::thread::sleep(STOP_POLL_INTERVAL);
-        if !is_process_alive(pid) {
+        if !is_process_alive(pid) && descendants.iter().all(|&d| !is_process_alive(d)) {
             break;
         }
         if Instant::now() >= deadline {
             let _ = kill(nix_pid, Signal::SIGKILL);
+            for &d in &descendants {
+                let _ = kill(to_nix_pid(d), Signal::SIGKILL);
+            }
             std::thread::sleep(STOP_POLL_INTERVAL);
             break;
         }
     }
 
-    let _ = std::fs::remove_file(state_dir.join(".sockets").join(&meta.host));
+    let _ = std::fs::remove_file(crate::state::active_socket_path(state_dir, meta));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.pid")));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.meta")));
 }

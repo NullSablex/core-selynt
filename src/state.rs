@@ -1,12 +1,19 @@
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use anyhow::{Context, Result};
 
 pub const PLUGIN_PATH: &str = "/usr/local/directadmin/plugins/selynt_panel";
 pub const DA_USERS_BASE: &str = "/usr/local/directadmin/data/users";
+/// Where DirectAdmin keeps the vhost templates it generates configs from.
+pub const DA_TEMPLATES: &str = "/usr/local/directadmin/data/templates";
+/// Root of the panel's per-account state.
+pub const STATE_BASE: &str = "/var/lib/selynt_panel";
+/// Set when the proxy config no longer matches the live apps.
+pub const SYNC_MARKER: &str = "/var/lib/selynt_panel/.sync_needed";
 
 const GETPWNAM_BUF_SIZE: usize = 4096;
 const STATE_SUBDIRS: [&str; 3] = [".run", ".sockets", ".proxy"];
@@ -29,6 +36,19 @@ pub struct AppMeta {
 }
 
 /// Looks up an account by name, returning `(uid, gid, home)`.
+/// uid and gid of a system account, when it exists.
+pub fn lookup_user_ids(username: &str) -> Option<(u32, u32)> {
+    lookup_user(username).ok().map(|(uid, gid, _)| (uid, gid))
+}
+
+/// Whether a system account by this name exists.
+///
+/// A state directory can outlive the account it belongs to, and acting on one
+/// of those would resolve to nothing useful.
+pub fn user_exists(username: &str) -> bool {
+    lookup_user(username).is_ok()
+}
+
 fn lookup_user(username: &str) -> Result<(u32, u32, String)> {
     let cname = std::ffi::CString::new(username).context("USERNAME contains a null byte")?;
 
@@ -59,7 +79,7 @@ fn lookup_user(username: &str) -> Result<(u32, u32, String)> {
 }
 
 /// Resolves a uid back to its account name, if it has one.
-fn lookup_uid(uid: u32) -> Option<String> {
+pub fn lookup_uid(uid: u32) -> Option<String> {
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut buf = vec![0u8; GETPWNAM_BUF_SIZE];
     let mut result: *mut libc::passwd = ptr::null_mut();
@@ -138,6 +158,21 @@ fn usertype_is_privileged(usertype: Option<&str>) -> bool {
 ///
 /// A plain `user` account is never privileged, so a customer cannot reach
 /// another customer's apps even though the CGI runs under their own uid.
+/// Whether the caller may install, reconfigure or remove the plugin itself.
+///
+/// Stricter than [`caller_is_privileged`] on purpose. The web server and
+/// DirectAdmin's CGI account are trusted to act *on behalf of* an account —
+/// that is what serving the panel requires — but not to take the panel apart.
+/// Anything reaching one of those accounts, a compromised CGI endpoint for
+/// instance, could otherwise stop every app on the server and strip the
+/// configuration.
+///
+/// Installation is a decision an administrator makes at a shell, so it asks for
+/// the identity a shell has.
+pub fn caller_is_root() -> bool {
+    unsafe { libc::getuid() == 0 }
+}
+
 pub fn caller_is_privileged() -> bool {
     let caller_uid = unsafe { libc::getuid() };
     if caller_uid == 0 {
@@ -264,10 +299,31 @@ pub fn init_state_dir(state_dir: &Path, uid: u32, gid: u32) -> Result<()> {
     chown_recursive(state_dir, uid, gid)
         .with_context(|| format!("chown -R {uid}:{gid} {}", state_dir.display()))?;
 
+    // `.run` is handed back to root, with the sticky bit and group write. The
+    // account still creates its own `.pid`/`.meta`/`.enabled` there, but the
+    // sticky bit stops it removing or replacing entries it does not own — and
+    // `.app`, the only file that says what to execute, is written as root.
+    // Without this an app could delete a neighbour's `.app`, or drop in one of
+    // its own for the panel to launch.
+    let run_dir = state_dir.join(".run");
+    if run_dir.is_dir() {
+        chown_path(&run_dir, 0, gid)
+            .with_context(|| format!("chown root:{gid} {}", run_dir.display()))?;
+        std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o1770))
+            .with_context(|| format!("chmod 1770 {}", run_dir.display()))?;
+    }
+
     Ok(())
 }
 
+/// Hands the state tree to the account, leaving `.run` alone.
+///
+/// `.run` is deliberately root-owned — see `init_state_dir` — so sweeping it
+/// into the recursive chown would undo that on every single invocation.
 fn chown_recursive(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    if path.file_name().is_some_and(|n| n == ".run") {
+        return Ok(());
+    }
     chown_path(path, uid, gid)?;
     if path.is_dir() {
         for entry in std::fs::read_dir(path)
@@ -323,6 +379,18 @@ pub fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
     }
     std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o750))
         .with_context(|| format!("chmod 750 {}", logs_dir.display()))?;
+
+    // The log files themselves, not just the directory: they are created while
+    // still root, in the prelude, so they would be left root-owned and the app
+    // could not reopen them on the next start.
+    if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                let _ = chown_path(&p, uid, gid);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -356,8 +424,103 @@ pub fn set_perm(path: &Path, mode: u32) -> Result<()> {
         .with_context(|| format!("chmod {mode:o} {}", path.display()))
 }
 
+/// Every account with panel state, as `(state_dir, username)`.
+///
+/// One place to decide what counts as an account. The state base also holds
+/// dotfiles, and a directory can outlive the account it belonged to — filtering
+/// that in each caller is how the checks stopped agreeing with each other.
+pub fn list_accounts() -> Vec<(PathBuf, String)> {
+    let Ok(entries) = std::fs::read_dir(STATE_BASE) else {
+        return Vec::new();
+    };
+
+    let mut accounts: Vec<(PathBuf, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let dir = entry.path();
+            let name = dir.file_name()?.to_str()?.to_string();
+            if name.starts_with('.') || !dir.join(".run").is_dir() || !user_exists(&name) {
+                return None;
+            }
+            Some((dir, name))
+        })
+        .collect();
+
+    // Stable order, so output does not shuffle between runs.
+    accounts.sort_by(|a, b| a.1.cmp(&b.1));
+    accounts
+}
+
+/// Whether this account runs its apps isolated from each other.
+///
+/// Isolation is a property of the **account**, not of a single app. A namespace
+/// confines what the process inside it can see; it does not change the uid, so
+/// a non-isolated sibling — same uid, ordinary view of the host — could still
+/// read an isolated app's files and signal its processes. Protecting one app
+/// therefore only works if every app of the account is isolated.
+pub fn account_is_isolated(state_dir: &Path) -> bool {
+    match std::fs::read_to_string(state_dir.join("isolated")) {
+        Ok(v) => v.trim() == "1",
+        // No choice recorded for this account: fall back to the server-wide
+        // default the admin set. Accounts that predate the setting behave as
+        // the admin decided, without needing to be touched one by one.
+        Err(_) => std::fs::read_to_string(format!("{PLUGIN_PATH}/etc/default_isolated"))
+            .is_ok_and(|v| v.trim() == "1"),
+    }
+}
+
+/// The socket path a running app actually has, recorded when it started.
+///
+/// Not the same as `socket_path_for` once the account's isolation mode changes:
+/// the path moves, but a running app keeps the one it was launched with. Stops
+/// and cleanups have to act on this, or they strand the real file and delete
+/// one that was never there.
+///
+/// Falls back to the configured path when nothing was recorded — an app started
+/// by an older build, or one that is not running.
+pub fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
+    let meta_file = state_dir
+        .join(".run")
+        .join(format!("{}.meta", meta.name));
+
+    std::fs::read_to_string(meta_file)
+        .ok()
+        .and_then(|c| parse_kv(&c).get("socket").cloned())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| socket_path_for(state_dir, meta))
+}
+
+/// Where an app's Unix socket lives.
+///
+/// With isolation off, it goes straight into the account's `.sockets/`, which
+/// is what the proxy has always expected. With isolation on, each app gets a
+/// subdirectory of its own: the sandbox binds only that directory into the
+/// app's mount namespace, so a sibling's socket is not merely unreadable but
+/// absent. The socket stays a real file on the host either way — the proxy has
+/// to reach it.
+pub fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
+    let sockets = state_dir.join(".sockets");
+    if account_is_isolated(state_dir) {
+        sockets.join(&meta.name).join(&meta.host)
+    } else {
+        sockets.join(&meta.host)
+    }
+}
+
 pub fn load_app_meta(state_dir: &Path, name: &str) -> Result<AppMeta> {
     let app_file = state_dir.join(".run").join(format!("{name}.app"));
+
+    // `.run` has to stay writable for the account's own `.pid`/`.meta`, so an
+    // app can still drop a file in it. Only root writes `.app`, so anything
+    // with another owner was forged — refuse it rather than launch whatever it
+    // describes.
+    let owner = std::fs::metadata(&app_file)
+        .with_context(|| format!("app '{name}' not found"))?
+        .uid();
+    if owner != 0 {
+        anyhow::bail!("app '{name}' has untrusted metadata (owner uid {owner}, expected root)");
+    }
+
     let content =
         std::fs::read_to_string(&app_file).with_context(|| format!("app '{name}' not found"))?;
     let kv = parse_kv(&content);
@@ -382,7 +545,10 @@ pub fn list_app_names(state_dir: &Path) -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(&run_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            // Same reasoning as `load_app_meta`: a `.app` not owned by root was
+            // planted by the account, so it is not an app the panel knows.
             if path.extension().and_then(|e| e.to_str()) == Some("app")
+                && std::fs::metadata(&path).is_ok_and(|m| m.uid() == 0)
                 && let Some(name) = path.file_stem().and_then(|s| s.to_str())
             {
                 names.push(name.to_string());
@@ -458,6 +624,18 @@ mod tests {
 
     /// The username lands in a path, so traversal must not reach another
     /// account's user.conf.
+    /// The two levels must not collapse into one: the web server account is
+    /// privileged enough to serve the panel, and must not be enough to remove
+    /// it. Tests run unprivileged, which is exactly the case that has to be
+    /// refused.
+    #[test]
+    fn installing_requires_more_than_being_privileged() {
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        assert!(!super::caller_is_root(), "non-root must not pass the install gate");
+    }
+
     #[test]
     fn user_conf_path_is_scoped_to_data_users() {
         let p = da_user_conf("bob");

@@ -58,9 +58,19 @@ fn try_setfacl(
             .is_ok_and(|s| s.success())
     };
 
+    // An isolated app's socket sits one level deeper, in a directory of its
+    // own; the web server needs to traverse that too.
+    let app_socket_dir = socket_path
+        .parent()
+        .filter(|p| *p != sockets_dir)
+        .map(Path::to_path_buf);
+
     setfacl(state_dir, &traverse)
         && setfacl(sockets_dir, &traverse)
         && setfacl(proxy_dir, &traverse)
+        && app_socket_dir
+            .as_deref()
+            .is_none_or(|d| setfacl(d, &traverse))
         && setfacl(socket_path, &read_write)
         && setfacl(marker_path, &read_only)
 }
@@ -76,6 +86,9 @@ fn fallback_chmod(
 ) {
     for dir in &[state_dir, sockets_dir, proxy_dir] {
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711));
+    }
+    if let Some(d) = socket_path.parent().filter(|p| *p != sockets_dir) {
+        let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o711));
     }
     let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
     let _ = std::fs::set_permissions(marker_path, std::fs::Permissions::from_mode(0o604));

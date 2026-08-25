@@ -7,9 +7,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::state::{PLUGIN_PATH, chown_path};
+use crate::state::{PLUGIN_PATH, STATE_BASE, chown_path};
 
-const STATE_BASE: &str = "/var/lib/selynt_panel";
 
 /// Validates a locale code against the dictionaries shipped under
 /// `lib/i18n/*.json`. `en` is always accepted (the built-in default). Returns

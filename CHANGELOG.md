@@ -69,35 +69,56 @@ correção.
 - `HOME` passa a ser fixado logo após a resolução do usuário, com o valor obtido
   de `getpwnam` (não do ambiente)
 
-### Fixed
+**Portas expostas por apps já em execução**
+- A proibição de abrir porta de rede só era verificada durante o start, e apenas
+  no processo do app. O bloqueio de `listen()` vive no `node-loader`, que cobre
+  só o processo principal: um filho iniciado sem ele — ou um app que não seja
+  Node — abria qualquer porta, a qualquer momento depois, contornando o proxy
+- Novo comando `netguard`: varre os PIDs do **cgroup** do app, onde todo filho
+  está, e para quem estiver com bind alcançável de fora. Reação medida em ~1s
+  com o timer que o acompanha
+- Loopback continua permitido: um app falando consigo mesmo (cache local, IPC
+  entre workers) não expõe nada. A distinção lê o endereço de `/proc/net/*` e
+  cobre IPv4, IPv6 e v4-mapped (`::ffff:7f00:0001`)
 
-**Apps morriam junto com o processo que os iniciou**
-- Um app herdava o cgroup de quem o executou — o processo CGI do painel, ou a
-  unidade `oneshot` de recuperação no boot. Quando esse cgroup era encerrado, o
-  systemd levava o app junto: no boot ele subia e morria no mesmo instante, e um
-  app iniciado por sessão de login ficava à mercê de `KillUserProcesses`
-- `start` passa a registrar cada app em um escopo systemd próprio
-  (`selynt-<user>-<app>.scope`), tornando-o independente do processo pai
-- O escopo é criado no prelude, como root: registrar unidade transiente exige o
-  barramento do sistema, e um chamador sem privilégio recebe "Interactive
-  authentication required". O rebaixamento passa a ser feito pelo systemd via
-  `--uid`/`--gid`, com o mesmo uid/gid que `drop_privileges` aplicaria
-- `--collect` remove a unidade ao término, para que um app que caia não deixe
-  unidade em estado de falha bloqueando o próximo start com o mesmo nome
-- Onde não há systemd, o comportamento anterior é mantido
-
-**Sequências ANSI tornavam os logs ilegíveis no painel**
-- Bibliotecas de log costumam colorir incondicionalmente (o
-  `tracing-subscriber` do Rust habilita `ansi` por padrão e *não* testa se há
-  terminal), então os escapes são gravados no arquivo e aparecem como `[2m`,
-  `[0m` no visualizador HTML do painel
-- `cmd_logs` passa a remover ANSI (formas CSI, OSC e de dois bytes) de cada
-  linha; o arquivo de log em si permanece intacto
-
-**`remove` apagava o `.env` mesmo sem `--delete-dir` (#3)**
-- Com o diretório preservado, apenas os logs do app são removidos; `.env` e demais arquivos do usuário permanecem intactos
+**Runtimes Node.js executados como root sem verificação de posse**
+- A detecção roda cada candidato para ler `--version` e é alcançável pelo
+  prelúdio root, mas confiava apenas na localização do arquivo. Não bastava: as
+  árvores de runtime costumam ficar com o dono de quem as descompactou (o nvm
+  preserva o dono do `$NVM_DIR`; um tarball mantém o uid do arquivo), e o
+  `npm install -g` escreve nelas com essa conta — um pacote comprometido
+  substituía o `node` e ganhava execução como root
+- Confirmado em servidor real: os binários estavam `admin:admin` e
+  `almalinux:almalinux`, nenhum deles root
+- `is_safe_to_execute` passa a exigir que o caminho **resolvido** esteja sob uma
+  raiz confiável **e** que o arquivo e cada diretório acima dele sejam do root e
+  não graváveis por outros — um pai gravável permite trocar o binário
+- Também fecha o caso do symlink: `canonicalize` já era chamado, mas só para
+  deduplicar; o alvo resolvido era descartado e o caminho original executado
 
 ### Added
+
+**Isolamento entre aplicações da mesma conta**
+- Novo `set-isolated --isolated true|false` (conta) e
+  `admin save-default-isolated` (padrão do servidor). Ligado, cada app roda em
+  namespaces de mount e PID próprios: os vizinhos não existem para ele — nem os
+  arquivos, nem os processos, nem os sockets
+- Vale para a **conta inteira**, não app a app. Um namespace confina o que o
+  processo de dentro enxerga, mas não muda seu uid: um app não isolado, com a
+  visão normal do host, ainda leria os arquivos de um isolado e mataria seus
+  processos. Isolar um só protegeria os outros dele, não ele dos outros
+- Sem criar usuário de sistema por app: o app segue rodando como a conta, e o
+  proxy o alcança pela mesma ACL POSIX de sempre
+- Requer `bubblewrap` e namespaces de usuário habilitados; onde não houver, o
+  app roda compartilhado em vez de falhar ao iniciar
+
+**Detecção de runtimes em `/usr/local/lib/nodejs`**
+- Onde o tarball oficial é convencionalmente descompactado. Antes só era
+  alcançado pelo symlink `/usr/local/bin/node`, então uma segunda versão
+  instalada ali ao lado da primeira ficava invisível
+
+**Comando `status-isolated`** — reporta o modo da conta e quais apps ainda rodam
+com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 **Limites de memória sob demanda**
 - Cada conta ganha uma slice systemd (`selynt-<user>.slice`) com o `MemoryMax`
@@ -149,6 +170,73 @@ correção.
 - Valores de metadados (`cwd`, `domain`, `subdomain`, `node_version`) passam a rejeitar quebras de linha e bytes nulos, que forjariam chaves no arquivo `.app`
 
 ---
+
+### Fixed
+
+**Glob de runtimes nunca casava com `/opt/alt/alt-nodejs*`**
+- `glob_paths` aceitava `*` apenas ocupando um componente inteiro do caminho,
+  então o padrão do CloudLinux — onde o `*` fica no meio do nome — não casava
+  com nada. O suporte estava quebrado em silêncio
+- O `*` passa a casar dentro de um componente, com literais dos dois lados
+
+**Logs de aplicação ficavam do root**
+- `init_app_logs_dir` fazia `chown` apenas do diretório; os arquivos, criados no
+  prelúdio root, ficavam `root:apache` e o app não conseguia reabri-los —
+  `restart` falhava com `log_open_failed`
+- Agora faz `chown` dos arquivos, e roda também no `Restart` (antes só no
+  `Start`, que era o único a chegar nesse caminho)
+
+**Apps sandboxed deixavam processo órfão ao parar**
+- O `bwrap` não repassa sinais ao filho, e o pid que o painel rastreia é o dele:
+  o `SIGTERM` parava o wrapper e deixava o processo real vivo, segurando o
+  socket
+- `stop_internal` passa a sinalizar toda a árvore de descendentes
+
+**Socket perdido ao alternar o modo de isolamento**
+- O caminho do socket muda entre os modos, mas um app em execução mantém o que
+  recebeu ao iniciar; parar o app procurava no lugar errado e deixava o arquivo
+  para trás
+- O `.meta` passa a registrar o socket real, e é ele que orienta a limpeza
+
+**`--isolated` não podia ser desligado**
+- A flag era booleana pura, então `--isolated false` era recusado pelo parser e
+  não havia como voltar ao modo compartilhado pela linha de comando
+
+**Apps morriam junto com o processo que os iniciou**
+- Um app herdava o cgroup de quem o executou — o processo CGI do painel, ou a
+  unidade `oneshot` de recuperação no boot. Quando esse cgroup era encerrado, o
+  systemd levava o app junto: no boot ele subia e morria no mesmo instante, e um
+  app iniciado por sessão de login ficava à mercê de `KillUserProcesses`
+- `start` passa a registrar cada app em um escopo systemd próprio
+  (`selynt-<user>-<app>.scope`), tornando-o independente do processo pai
+- O escopo é criado no prelude, como root: registrar unidade transiente exige o
+  barramento do sistema, e um chamador sem privilégio recebe "Interactive
+  authentication required". O rebaixamento passa a ser feito pelo systemd via
+  `--uid`/`--gid`, com o mesmo uid/gid que `drop_privileges` aplicaria
+- `--collect` remove a unidade ao término, para que um app que caia não deixe
+  unidade em estado de falha bloqueando o próximo start com o mesmo nome
+- Onde não há systemd, o comportamento anterior é mantido
+
+**Sequências ANSI tornavam os logs ilegíveis no painel**
+- Bibliotecas de log costumam colorir incondicionalmente (o
+  `tracing-subscriber` do Rust habilita `ansi` por padrão e *não* testa se há
+  terminal), então os escapes são gravados no arquivo e aparecem como `[2m`,
+  `[0m` no visualizador HTML do painel
+- `cmd_logs` passa a remover ANSI (formas CSI, OSC e de dois bytes) de cada
+  linha; o arquivo de log em si permanece intacto
+
+**`remove` apagava o `.env` mesmo sem `--delete-dir` (#3)**
+- Com o diretório preservado, apenas os logs do app são removidos; `.env` e demais arquivos do usuário permanecem intactos
+
+### Changed
+
+**Runtimes reunidos em `Runtime`**
+- O comportamento que varia por ambiente era decidido por comparações
+  `app_type == "node"` espalhadas por `manage`, `start` e `main`. Um runtime
+  novo exigia encontrar cada uma delas, e a esquecida falhava em execução
+- Agora tudo o que difere (`is_interpreted`, `scaffolds_entry`,
+  `requires_executable_entry`, `command_display`) pende do enum, e uma variante
+  nova faz o compilador apontar cada decisão pendente
 
 ## [1.1.0] — 2026-03-29
 
