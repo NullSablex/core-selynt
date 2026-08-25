@@ -17,8 +17,8 @@ jobs:
     steps:
       - uses: actions/first-interaction@v3
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          issue-message: |
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_message: |
             Olá! Obrigado por abrir esta issue. 👋
 
             Antes de prosseguir, certifique-se de que:
@@ -27,7 +27,7 @@ jobs:
             - Não existe outra issue aberta com o mesmo assunto
 
             Agradecemos sua contribuição ao **Core Selynt**!
-          pr-message: |
+          pr_message: |
             Olá! Obrigado por enviar este Pull Request. 👋
 
             Antes de revisarmos, verifique se:
