@@ -154,6 +154,50 @@ fn parse_cpu_quota(raw: &str) -> Option<u32> {
 /// CPU is a cumulative counter, so a single reading cannot express a rate. The
 /// raw value is returned and the caller samples twice — that keeps the CGI from
 /// blocking for a second on every request.
+/// What the app is consuming right now: memory, CPU time, process count.
+///
+/// Zeroes when it is not running: a stopped app has no cgroup, and the UI has
+/// to render the row either way.
+fn current_usage(dir: &Path, running: bool) -> (u64, u64, u64) {
+    if !running {
+        return (0, 0, 0);
+    }
+    (
+        read_anon_bytes(dir)
+            .or_else(|| read_num(&dir.join("memory.current")))
+            .unwrap_or(0),
+        read_cpu_usec(dir).unwrap_or(0),
+        read_num(&dir.join("pids.current")).unwrap_or(0),
+    )
+}
+
+/// The ceiling to show the app against, most specific first.
+///
+/// The resolved limit, then the user's own pin — which applies even with no
+/// account allowance to divide — then the account, and the machine's RAM only
+/// as a last resort: showing "16 MB of 3.6 GB" for an app pinned at 200 MB said
+/// nothing about the limit the user had just set.
+fn resolve_memory_ceiling(
+    app: Option<super::policy::AppLimits>,
+    meta: &crate::sys::state::AppMeta,
+    limits: &DaLimits,
+) -> Option<u64> {
+    app.map(|l| l.max)
+        .or(meta.memory_max)
+        .or(limits.memory_max)
+        .or_else(machine_ram_bytes)
+}
+
+/// Total RAM, so a percentage still means something with no cap anywhere.
+fn machine_ram_bytes() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
+        m.lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))
+            .and_then(|v| v.trim().trim_end_matches(" kB").trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    })
+}
+
 pub(crate) fn cmd_stats(
     state_dir: &Path,
     name: &str,
@@ -172,46 +216,12 @@ pub(crate) fn cmd_stats(
     // UI can render the row either way.
     let running = status == "RUNNING" && dir.is_dir();
 
-    let memory_used = if running {
-        read_anon_bytes(&dir)
-            .or_else(|| read_num(&dir.join("memory.current")))
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let cpu_usec = if running {
-        read_cpu_usec(&dir).unwrap_or(0)
-    } else {
-        0
-    };
-    let pids = if running {
-        read_num(&dir.join("pids.current")).unwrap_or(0)
-    } else {
-        0
-    };
+    let (memory_used, cpu_usec, pids) = current_usage(&dir, running);
 
     // The limits this app actually runs under.
     let app = app_limits_for(state_dir, username, name, &meta);
 
-    // Fall back to the machine's total RAM so a percentage still means
-    // something when the account has no explicit cap.
-    // What the app is actually held to, most specific first: the resolved
-    // ceiling, then the user's own pin (which applies even when the account has
-    // no allowance to divide), then the account, and only as a last resort the
-    // machine's RAM — showing "16 MB of 3.6 GB" for an app pinned at 200 MB
-    // told the user nothing about the limit they had just set.
-    let memory_limit = app
-        .map(|l| l.max)
-        .or(meta.memory_max)
-        .or(limits.memory_max)
-        .or_else(|| {
-            std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
-                m.lines()
-                    .find_map(|l| l.strip_prefix("MemTotal:"))
-                    .and_then(|v| v.trim().trim_end_matches(" kB").trim().parse::<u64>().ok())
-                    .map(|kb| kb * 1024)
-            })
-        });
+    let memory_limit = resolve_memory_ceiling(app, &meta, &limits);
 
     let cpu_quota = limits.cpu_quota_percent;
 

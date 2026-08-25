@@ -283,6 +283,35 @@ fn run_server_wide(command: ServerWide, debug: bool) -> ! {
     }
 }
 
+/// Refuses a server-wide command the caller may not run.
+///
+/// Three levels, not two. `SyncProxy` only rewrites a file derived from state
+/// the panel itself wrote, so any account may ask for it. `Setup` and
+/// `Teardown` change the installation — the web server's account is trusted to
+/// act for a customer, not to uninstall the panel.
+fn require_server_wide_authority(command: ServerWide) {
+    let allowed = match command {
+        ServerWide::SyncProxy => true,
+        ServerWide::Setup | ServerWide::Teardown => sys::auth::caller_is_root(),
+        _ => sys::auth::caller_is_privileged(),
+    };
+    if allowed {
+        return;
+    }
+    let (code, message) = if matches!(command, ServerWide::Setup | ServerWide::Teardown) {
+        (
+            "root_required",
+            "installing or removing the plugin requires root",
+        )
+    } else {
+        (
+            "admin_required",
+            "server-wide maintenance requires root or the panel web user",
+        )
+    };
+    system_error(code, message);
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -295,29 +324,7 @@ fn main() {
     // the picture entirely — there is no account to name, and demanding one
     // would be asking for a value the answer does not depend on.
     if let Some(command) = server_wide_command(&cli.command) {
-        // Three levels, not two. `SyncProxy` only rewrites a file derived from
-        // state the panel itself wrote, so any account may ask for it. `Setup`
-        // and `Teardown` change the installation — the web server's account is
-        // trusted to act for a customer, not to uninstall the panel.
-        let allowed = match command {
-            ServerWide::SyncProxy => true,
-            ServerWide::Setup | ServerWide::Teardown => sys::auth::caller_is_root(),
-            _ => sys::auth::caller_is_privileged(),
-        };
-        if !allowed {
-            let (code, message) = if matches!(command, ServerWide::Setup | ServerWide::Teardown) {
-                (
-                    "root_required",
-                    "installing or removing the plugin requires root",
-                )
-            } else {
-                (
-                    "admin_required",
-                    "server-wide maintenance requires root or the panel web user",
-                )
-            };
-            system_error(code, message);
-        }
+        require_server_wide_authority(command);
         run_server_wide(command, cli.debug);
     }
 

@@ -356,6 +356,29 @@ pub(crate) fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, d
     ))
 }
 
+/// Erases everything the panel recorded about an app: run state, sockets and
+/// the proxy marker.
+///
+/// `stop_internal` already removed the live socket, but on failure the app
+/// still has to disappear from disk. Both socket paths are cleared: they differ
+/// when the account switched isolation mode while the app was down, and neither
+/// may be left behind.
+fn remove_run_state(state_dir: &Path, name: &str, meta: &AppMeta) {
+    // Read while `.meta` is still around — that is what records where the
+    // socket really is.
+    let active_socket = crate::sys::state::active_socket_path(state_dir, meta);
+
+    let run_dir = state_dir.join(".run");
+    for ext in &["pid", "meta", "enabled"] {
+        let _ = std::fs::remove_file(run_dir.join(format!("{name}.{ext}")));
+    }
+
+    let _ = std::fs::remove_file(&active_socket);
+    let _ = std::fs::remove_file(crate::sys::state::socket_path_for(state_dir, meta));
+    let _ = std::fs::remove_dir(state_dir.join(".sockets").join(name));
+    let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
+}
+
 pub(crate) fn cmd_remove(
     state_dir: &Path,
     name: &str,
@@ -371,25 +394,9 @@ pub(crate) fn cmd_remove(
 
     stop_internal(state_dir, name, &meta, 10);
 
-    // Defensive — `stop_internal` already removed the socket, but on failure the
-    // app still has to disappear from disk. Read while `.meta` is still around,
-    // since that is what records where the socket really is.
-    let active_socket = crate::sys::state::active_socket_path(state_dir, &meta);
-
-    let run_dir = state_dir.join(".run");
-    for ext in &["pid", "meta", "enabled"] {
-        let _ = std::fs::remove_file(run_dir.join(format!("{name}.{ext}")));
-    }
+    remove_run_state(state_dir, name, &meta);
 
     let cwd_path = PathBuf::from(&meta.cwd);
-
-    let _ = std::fs::remove_file(&active_socket);
-    // The configured path too: it differs from the active one when the account
-    // switched isolation mode while the app was down, and neither may be left
-    // behind.
-    let _ = std::fs::remove_file(crate::sys::state::socket_path_for(state_dir, &meta));
-    let _ = std::fs::remove_dir(state_dir.join(".sockets").join(name));
-    let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
 
     if delete_dir {
         // Never delete *through* a link. `remove_dir_all` on a symlinked cwd

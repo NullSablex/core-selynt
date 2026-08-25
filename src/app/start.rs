@@ -59,6 +59,46 @@ fn app_has_external_port(username: &str, name: &str, pid: u32) -> bool {
     has_external_listen(&pids)
 }
 
+/// Kills the app and fails the start if it bound a reachable port.
+///
+/// Checked once the socket is up: an app can open a port at any point during
+/// startup, and the periodic sweep would only notice it later.
+fn refuse_external_port(ctx: &WaitContext<'_>, socket_path: &Path) {
+    if !app_has_external_port(ctx.username, ctx.name, ctx.pid) {
+        return;
+    }
+    let nix_pid = to_nix_pid(ctx.pid);
+    let _ = kill(nix_pid, Signal::SIGTERM);
+    std::thread::sleep(KILL_GRACE);
+    let _ = kill(nix_pid, Signal::SIGKILL);
+    cleanup_failed(ctx.pid_file, ctx.meta_file, Some(socket_path));
+    user_error("network_port_forbidden", NETWORK_PORT_FORBIDDEN_MSG);
+}
+
+/// Makes the app reachable: the proxy marker, the socket ACL, and the
+/// `.enabled` flag boot recovery reads.
+fn publish_route(
+    state_dir: &Path,
+    name: &str,
+    socket_path: &Path,
+    marker_path: &Path,
+    web_user: &str,
+) {
+    if let Err(e) = std::fs::write(marker_path, b"")
+        .and_then(|()| std::fs::set_permissions(marker_path, std::fs::Permissions::from_mode(0o644)))
+    {
+        system_error("marker_failed", &format!("{e:#}"));
+    }
+
+    apply_acl(state_dir, socket_path, marker_path, web_user);
+
+    // Intent, so boot recovery restarts this app. Removed by `stop` and
+    // `remove`; a restart re-runs this and recreates it.
+    let enabled = state_dir.join(".run").join(format!("{name}.enabled"));
+    let _ = std::fs::write(&enabled, b"")
+        .and_then(|()| std::fs::set_permissions(&enabled, std::fs::Permissions::from_mode(0o600)));
+}
+
 pub(crate) fn cmd_start(
     state_dir: &Path,
     name: &str,
@@ -127,29 +167,8 @@ pub(crate) fn cmd_start(
     wait_for_socket_file(&ctx);
     wait_for_socket_accept(&ctx);
 
-    if app_has_external_port(username, name, pid) {
-        let nix_pid = to_nix_pid(pid);
-        let _ = kill(nix_pid, Signal::SIGTERM);
-        std::thread::sleep(KILL_GRACE);
-        let _ = kill(nix_pid, Signal::SIGKILL);
-        cleanup_failed(&pid_file, &meta_file, Some(&socket_path));
-        user_error("network_port_forbidden", NETWORK_PORT_FORBIDDEN_MSG);
-    }
-
-    if let Err(e) = std::fs::write(&marker_path, b"").and_then(|()| {
-        std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o644))
-    }) {
-        system_error("marker_failed", &format!("{e:#}"));
-    }
-
-    apply_acl(state_dir, &socket_path, &marker_path, web_user);
-
-    // Persist intent so boot-recovery can re-start this app after a reboot.
-    // Removed by `cmd_stop` and `cmd_remove`; `cmd_restart` re-runs `cmd_start`,
-    // which recreates the marker.
-    let enabled_path = state_dir.join(".run").join(format!("{name}.enabled"));
-    let _ = std::fs::write(&enabled_path, b"")
-        .and_then(|()| std::fs::set_permissions(&enabled_path, std::fs::Permissions::from_mode(0o600)));
+    refuse_external_port(&ctx, &socket_path);
+    publish_route(state_dir, name, &socket_path, &marker_path, web_user);
 
     signal_sync();
 
@@ -191,6 +210,69 @@ pub(crate) fn spawn_into_scope(
     ))
 }
 
+/// Opens an app's log files, truncating them first.
+///
+/// Each run starts empty: the panel shows what the app is saying *now*, and
+/// keeping the previous run's output made fixed errors look current.
+fn open_log_files(cwd: &Path, name: &str) -> (std::fs::File, std::fs::File) {
+    let open = |path: &Path, which: &str| {
+        rotate_log_if_needed(path);
+        let _ = std::fs::write(path, b"");
+        match std::fs::OpenOptions::new().append(true).create(true).open(path) {
+            Ok(f) => f,
+            Err(e) => system_error("log_open_failed", &format!("{which} log: {e:#}")),
+        }
+    };
+    let logs = cwd.join("logs");
+    (
+        open(&logs.join(format!("{name}.out.log")), "stdout"),
+        open(&logs.join(format!("{name}.err.log")), "stderr"),
+    )
+}
+
+/// Creates the directory an isolated app's socket lives in, owned by the
+/// account.
+///
+/// It has to exist before the sandbox can bind it and before the app can
+/// `bind(2)`. Created here, while still root, so it would otherwise be left
+/// root-owned and the app could not create its socket in it.
+fn ensure_socket_dir(socket_path: &Path, scope: Option<(&str, u32, u32)>) {
+    let Some(dir) = socket_path.parent() else {
+        return;
+    };
+    if dir.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(dir);
+    let _ = set_perm(dir, 0o750);
+    if let Some((_, uid, gid)) = scope {
+        let _ = crate::sys::fs::chown_path(dir, uid, gid);
+    }
+}
+
+/// Puts the app inside its namespaces, when the account asked for isolation.
+///
+/// Applied *inside* the scope wrapper: the app has to stay in its own cgroup so
+/// the memory limits and the netguard sweep still see it. Refuses to start
+/// rather than run shared — isolation was accepted when it was switched on, so
+/// losing it means the host changed underneath, and starting anyway would give
+/// the account less separation than it is told it has.
+fn apply_sandbox(cmd: Command, isolated: bool, cwd: &Path, socket_path: &Path) -> Command {
+    if !isolated {
+        return cmd;
+    }
+    let Some(socket_dir) = socket_path.parent() else {
+        return cmd;
+    };
+    if !crate::limits::sandbox::available() {
+        user_error(
+            "sandbox_unavailable",
+            crate::limits::sandbox::unavailable_reason(),
+        );
+    }
+    crate::limits::sandbox::wrap(cmd, cwd, socket_dir)
+}
+
 fn spawn_app(
     meta: &AppMeta,
     name: &str,
@@ -200,76 +282,17 @@ fn spawn_app(
     isolated: bool,
 ) -> u32 {
     let cwd_path = PathBuf::from(&meta.cwd);
-    let log_out = cwd_path.join("logs").join(format!("{name}.out.log"));
-    let log_err = cwd_path.join("logs").join(format!("{name}.err.log"));
-    rotate_log_if_needed(&log_out);
-    rotate_log_if_needed(&log_err);
-
-    // Each run starts with empty logs. The panel shows what the app is saying
-    // *now*: keeping the previous run's output around made stale errors look
-    // current — the `NoNewPrivileges` failures stayed on screen long after the
-    // bug was fixed — and a stopped app appeared to still have something to say.
-    let _ = std::fs::write(&log_out, b"");
-    let _ = std::fs::write(&log_err, b"");
-
-    let stdout_file = match std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&log_out)
-    {
-        Ok(f) => f,
-        Err(e) => system_error("log_open_failed", &format!("stdout log: {e:#}")),
-    };
-    let stderr_file = match std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&log_err)
-    {
-        Ok(f) => f,
-        Err(e) => system_error("log_open_failed", &format!("stderr log: {e:#}")),
-    };
+    let (stdout_file, stderr_file) = open_log_files(&cwd_path, name);
 
     let env_vars = load_env_file(&cwd_path);
     let entry_path = cwd_path.join(&meta.entry);
     let socket_str = socket_path.to_string_lossy().to_string();
 
-    // An isolated app's socket sits in a directory of its own, which has to
-    // exist before the sandbox can bind it — and before the app can bind(2).
-    // This runs in the root prelude, so the directory would be left owned by
-    // root and the app could not create its socket in it.
-    if let Some(socket_dir) = socket_path.parent()
-        && !socket_dir.is_dir()
-    {
-        let _ = std::fs::create_dir_all(socket_dir);
-        let _ = set_perm(socket_dir, 0o750);
-        if let Some((_, uid, gid)) = scope {
-            let _ = crate::sys::fs::chown_path(socket_dir, uid, gid);
-        }
-    }
+    ensure_socket_dir(socket_path, scope);
 
-    let mut cmd = build_command(meta, &entry_path);
+    let cmd = build_command(meta, &entry_path);
 
-    // Isolation goes here, inside the scope wrapper applied below: the app must
-    // stay in its own cgroup so the memory limits and the netguard sweep still
-    // see it. An unavailable sandbox leaves the app running shared rather than
-    // refusing to start it.
-    if isolated
-        && let Some(socket_dir) = socket_path.parent()
-    {
-        if crate::limits::sandbox::available() {
-            cmd = crate::limits::sandbox::wrap(cmd, &cwd_path, socket_dir);
-        } else {
-            // Isolation was accepted when it was switched on, so losing it here
-            // means the host changed underneath — bubblewrap removed, or user
-            // namespaces disabled. Starting the app shared would silently give
-            // the account less separation than it is being told it has.
-            user_error(
-                "sandbox_unavailable",
-                crate::limits::sandbox::unavailable_reason(),
-            );
-        }
-    }
-
+    let mut cmd = apply_sandbox(cmd, isolated, &cwd_path, socket_path);
     cmd.env("SELYNT_SOCKET", &socket_str);
     cmd.env("SELYNT_HOST", &meta.host);
     for (k, v) in &env_vars {
