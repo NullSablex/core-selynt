@@ -27,7 +27,7 @@ const SYSTEM_PATHS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/et
 /// Bubblewrap is packaged on the distributions the panel targets but is not
 /// universally installed, and unprivileged namespaces can be disabled outright.
 /// Callers fall back to running the app unisolated.
-pub fn available() -> bool {
+pub(crate) fn available() -> bool {
     bwrap_path().is_some() && user_namespaces_enabled()
 }
 
@@ -35,13 +35,13 @@ pub fn available() -> bool {
 ///
 /// Returns an i18n key rather than prose: the panel translates it, and the CLI
 /// prints it as-is.
-pub fn unavailable_reason() -> &'static str {
+pub(crate) fn unavailable_reason() -> &'static str {
     if bwrap_path().is_none() {
         "errors.sandbox_no_bwrap"
-    } else if user_namespaces_enabled() {
-        "errors.sandbox_unavailable"
-    } else {
+    } else if !user_namespaces_enabled() {
         "errors.sandbox_no_userns"
+    } else {
+        "errors.sandbox_unavailable"
     }
 }
 
@@ -71,7 +71,7 @@ fn user_namespaces_enabled() -> bool {
 /// too, but the socket created on it would exist only inside the namespace and
 /// the proxy could never reach it — the socket has to be a real file on the
 /// host, in a directory the app alone can see.
-pub fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
+pub(crate) fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
     let Some(bwrap) = bwrap_path() else {
         return cmd;
     };
@@ -185,5 +185,31 @@ mod tests {
             .collect();
         assert_eq!(rw_binds.len(), 2, "only app dir and socket dir: {rw_binds:?}");
         assert!(!args.iter().any(|a| a == "/home/bob/apps"));
+    }
+
+    /// The reason is only asked for when isolation is unavailable, so with
+    /// bwrap present the cause is that namespaces are off. The branches were
+    /// once inverted — the arm meaning "namespaces are disabled" tested that
+    /// they were *enabled* — so the panel gave a generic message in the one
+    /// case it could actually explain, and named a missing feature that was
+    /// present in the other.
+    fn reason_for(bwrap: bool, userns: bool) -> &'static str {
+        if !bwrap {
+            "errors.sandbox_no_bwrap"
+        } else if !userns {
+            "errors.sandbox_no_userns"
+        } else {
+            "errors.sandbox_unavailable"
+        }
+    }
+
+    #[test]
+    fn unavailable_reason_names_the_actual_cause() {
+        assert_eq!(reason_for(false, true), "errors.sandbox_no_bwrap");
+        assert_eq!(reason_for(false, false), "errors.sandbox_no_bwrap");
+        // bwrap is installed, so what is missing is namespace support.
+        assert_eq!(reason_for(true, false), "errors.sandbox_no_userns");
+        // Both present: unavailability has some other cause.
+        assert_eq!(reason_for(true, true), "errors.sandbox_unavailable");
     }
 }

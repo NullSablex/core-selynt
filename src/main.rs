@@ -1,20 +1,20 @@
-mod acl;
+mod admin;
 mod cmd;
-mod output;
-mod proc;
-mod state;
+mod install;
+mod limits;
+mod runtime;
+mod sys;
+mod webserver;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use std::path::{Path, PathBuf};
 
-use cmd::runtime::Runtime;
-use output::system_error;
-use state::{
-    AppMeta, STATE_BASE,
-    DA_USERS_BASE, drop_privileges, init_app_logs_dir, init_state_dir, load_app_meta, resolve_target_user,
-};
+use runtime::kind::Runtime;
+use sys::output::system_error;
+use sys::state::{AppMeta, STATE_BASE, DA_USERS_BASE, init_app_logs_dir, init_state_dir, load_app_meta};
+use sys::auth::{drop_privileges, resolve_target_user};
 
 
 #[derive(Parser)]
@@ -271,11 +271,11 @@ fn run_server_wide(command: ServerWide, debug: bool) -> ! {
     match command {
         ServerWide::BootRecover => cmd::boot::cmd_boot_recover(cmd::boot::recover_all(), dbg.as_ref()),
         ServerWide::NetguardAll => {
-            cmd::netguard::report(Some(cmd::netguard::sweep_all_accounts()), dbg.as_ref())
+            limits::netguard::report(Some(limits::netguard::sweep_all_accounts()), dbg.as_ref())
         }
-        ServerWide::SyncProxy => cmd::proxysync::cmd_sync_proxy(dbg.as_ref()),
-        ServerWide::Setup => cmd::setup::cmd_setup(dbg.as_ref()),
-        ServerWide::Teardown => cmd::teardown::cmd_teardown(dbg.as_ref()),
+        ServerWide::SyncProxy => webserver::proxysync::cmd_sync_proxy(dbg.as_ref()),
+        ServerWide::Setup => install::setup::cmd_setup(dbg.as_ref()),
+        ServerWide::Teardown => install::teardown::cmd_teardown(dbg.as_ref()),
     }
 }
 
@@ -309,8 +309,8 @@ fn main() {
         // The rest is server-wide maintenance the panel triggers for itself.
         let allowed = match command {
             ServerWide::SyncProxy => true,
-            ServerWide::Setup | ServerWide::Teardown => state::caller_is_root(),
-            _ => state::caller_is_privileged(),
+            ServerWide::Setup | ServerWide::Teardown => sys::auth::caller_is_root(),
+            _ => sys::auth::caller_is_privileged(),
         };
         if !allowed {
             let (code, message) = if matches!(command, ServerWide::Setup | ServerWide::Teardown) {
@@ -336,7 +336,7 @@ fn main() {
     // as. Without this any local account could read the whole server's app
     // inventory — and `save-node-versions` would execute a caller-supplied
     // binary as root via NVM_DIR.
-    if matches!(cli.command, Commands::Admin { .. }) && !state::caller_is_privileged() {
+    if matches!(cli.command, Commands::Admin { .. }) && !sys::auth::caller_is_privileged() {
         system_error(
             "admin_required",
             "administrative commands require root or the panel web user",
@@ -360,13 +360,13 @@ fn main() {
     }
 
     let prelude = run_root_prelude(&cli.command, &username, &state_dir, uid, gid);
-    let web_user = state::get_web_user();
+    let web_user = sys::state::get_web_user();
 
     if let Err(e) = drop_privileges(uid, gid, &username) {
         system_error("privilege_drop_failed", &format!("{e:#}"));
     }
 
-    output::debug(format!("state_dir={}", state_dir.display()));
+    sys::output::debug(format!("state_dir={}", state_dir.display()));
 
     let dbg = build_debug_base(cli.debug, &username, &home, Some(&state_dir));
     dispatch(cli.command, &state_dir, &username, &web_user, prelude, dbg.as_ref())
@@ -381,7 +381,7 @@ fn main() {
 /// stop or remove their apps.
 fn resolve_state_dir(username: &str) -> PathBuf {
     let own = format!("{STATE_BASE}/{username}");
-    if !state::caller_is_privileged() {
+    if !sys::auth::caller_is_privileged() {
         return PathBuf::from(own);
     }
     PathBuf::from(
@@ -401,7 +401,7 @@ struct RootPrelude {
     diagnostic: Option<Result<serde_json::Value, (String, String)>>,
     /// Account resource limits from DirectAdmin's `user.conf`, which lives in a
     /// `diradmin`-owned `0700` directory and is unreadable after the drop.
-    da_limits: cmd::DaLimits,
+    da_limits: limits::usage::DaLimits,
     /// PID of an app spawned into its own systemd scope. Registering a scope
     /// needs the system bus, so it happens here while we are still root;
     /// `systemd-run --uid/--gid` performs the privilege drop for the app.
@@ -418,8 +418,39 @@ struct RootPrelude {
     /// Metadata of an app being removed. The `.app` is root-owned, so the
     /// prelude deletes it and passes what it held to the command.
     removed_meta: Option<AppMeta>,
-    /// Apps restarted to apply a change of isolation mode.
-    isolation_switch: Option<Result<Vec<String>, (String, String)>>,
+    /// Apps restarted to apply a change of isolation mode, and those that
+    /// failed to come back up.
+    isolation_switch: Option<Result<cmd::IsolationSwitch, (String, String)>>,
+}
+
+/// Whether this command needs the account's DirectAdmin allowance read.
+///
+/// Every command that touches memory limits, not just `Stats`: the allowance is
+/// the pool all the per-app limits are derived from, and `user.conf` is only
+/// readable here, as root. Reading it also re-applies the account's slice cap,
+/// so a quota an admin changed in DirectAdmin reaches the account without
+/// waiting for it to start or stop something.
+const fn wants_da_limits(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Stats { .. }
+            | Commands::Start { .. }
+            | Commands::Stop { .. }
+            | Commands::Remove { .. }
+            | Commands::SetMemoryMax { .. }
+            | Commands::List
+            | Commands::Status { .. }
+            | Commands::Restart { .. }
+    )
+}
+
+/// Whether this command launches an app into its own systemd scope.
+///
+/// `Restart` belongs here alongside `Start`, and the two must not drift: an app
+/// spawned outside the prelude lands outside systemd, with no cgroup of its
+/// own — no memory cap, and invisible to the netguard sweep.
+const fn spawns_into_scope(command: &Commands) -> bool {
+    matches!(command, Commands::Start { .. } | Commands::Restart { .. })
 }
 
 fn run_root_prelude(
@@ -434,20 +465,8 @@ fn run_root_prelude(
         _ => Vec::new(),
     };
 
-    // Read for every command that touches memory limits, not just Stats: the
-    // account allowance is the pool everything else is derived from, and
-    // `user.conf` is only readable here, as root.
-    let da_limits = if matches!(
-        command,
-        Commands::Stats { .. }
-            | Commands::Start { .. }
-            | Commands::Stop { .. }
-            | Commands::Remove { .. }
-            | Commands::SetMemoryMax { .. }
-            | Commands::List
-            | Commands::Status { .. }
-    ) {
-        let limits = cmd::read_da_limits(username);
+    let da_limits = if wants_da_limits(command) {
+        let limits = limits::usage::read_da_limits(username);
 
         // Re-apply on every command that reads them, not only on the ones that
         // change an app. The account's allowance lives in DirectAdmin and an
@@ -455,10 +474,10 @@ fn run_root_prelude(
         // stays on whatever ceiling was in force the last time it happened to
         // start or stop something — a raised quota never arriving, and a
         // lowered one never taking effect.
-        cmd::ensure_slice_cap(username, limits.memory_max);
+        limits::usage::ensure_slice_cap(username, limits.memory_max);
         limits
     } else {
-        cmd::DaLimits::default()
+        limits::usage::DaLimits::default()
     };
 
     // A pin takes effect on the live scope immediately — waiting for a restart
@@ -466,8 +485,8 @@ fn run_root_prelude(
     // needs root, hence here.
     if let Commands::SetMemoryMax { name, megabytes } = command {
         cmd::apply_memory_max(state_dir, name, *megabytes, uid, gid);
-        cmd::ensure_slice_cap(username, da_limits.memory_max);
-        cmd::reapply_app_limits(state_dir, username);
+        limits::usage::ensure_slice_cap(username, da_limits.memory_max);
+        limits::usage::reapply_app_limits(state_dir, username);
     }
 
     // Stopping or removing an app frees its share, so the survivors' guarantees
@@ -475,8 +494,8 @@ fn run_root_prelude(
     // killed after the privilege drop — so it is excluded explicitly, or the
     // others would be sized as if it were still competing.
     if let Commands::Stop { name, .. } | Commands::Remove { name, .. } = command {
-        cmd::ensure_slice_cap(username, da_limits.memory_max);
-        cmd::reapply_app_limits_excluding(state_dir, username, name);
+        limits::usage::ensure_slice_cap(username, da_limits.memory_max);
+        limits::usage::reapply_app_limits_excluding(state_dir, username, name);
     }
 
     // Switching isolation moves each app's socket and changes how it is
@@ -545,40 +564,46 @@ fn run_root_prelude(
     // account, so the sweep runs here, before the drop. The result is reported
     // by the dispatcher below, which is where the debug payload lives.
     let netguard_stopped = if matches!(command, Commands::Netguard { .. }) {
-        Some(cmd::netguard::sweep_account(state_dir, username))
+        Some(limits::netguard::sweep_account(state_dir, username))
     } else {
         None
     };
 
-    // `Restart` re-opens the log files after the drop, so their ownership has to
-    // be right for it too — and only root can fix it. It does not go through the
-    // scope-spawning path below, which is why this is separate.
+    // `Restart` stops the app here, as root, rather than letting `cmd_restart`
+    // do it after the drop. `stop_internal` resolves the process through
+    // `get_status`, which requires the process uid to match the caller's — true
+    // after the drop, never in this prelude. Stopping here is what lets the
+    // restart go on to spawn into a fresh systemd scope below: spawned after
+    // the drop instead, the app would land outside systemd altogether, with no
+    // cgroup of its own — escaping the account's memory cap, invisible to the
+    // netguard sweep (which walks cgroups), and liable to be torn down with the
+    // CGI process that happened to start it.
     if let Commands::Restart { name } = command
         && let Ok(meta) = load_app_meta(state_dir, name)
-        && let Err(e) = init_app_logs_dir(&PathBuf::from(&meta.cwd), uid, gid)
     {
-        output::debug(format!("init_app_logs_dir: {e:#}"));
+        limits::netguard::stop_app_tree(state_dir, name, &meta);
     }
 
     let mut spawned_pid = None;
-    if let Commands::Start { name } = command
+    if spawns_into_scope(command)
+        && let Commands::Start { name } | Commands::Restart { name } = command
         && let Ok(meta) = load_app_meta(state_dir, name)
     {
         // Re-resolve the running apps first: the app about to start counts
         // itself in `app_limits_for`, so the others must adjust before it
         // appears. Doing this after the spawn would delay the socket and trip
         // the readiness check.
-        cmd::ensure_slice_cap(username, da_limits.memory_max);
-        cmd::reapply_app_limits_including(state_dir, username, name);
+        limits::usage::ensure_slice_cap(username, da_limits.memory_max);
+        limits::usage::reapply_app_limits_including(state_dir, username, name);
         let cwd = PathBuf::from(&meta.cwd);
         if let Err(e) = init_app_logs_dir(&cwd, uid, gid) {
-            output::debug(format!("init_app_logs_dir: {e:#}"));
+            sys::output::debug(format!("init_app_logs_dir: {e:#}"));
         }
         spawned_pid = cmd::spawn_into_scope(&meta, name, state_dir, username, uid, gid);
         // The first app of an account creates the slice, so the call above had
         // nothing to configure. Now it exists.
         if spawned_pid.is_some() {
-            cmd::ensure_slice_cap(username, da_limits.memory_max);
+            limits::usage::ensure_slice_cap(username, da_limits.memory_max);
         }
     }
 
@@ -588,7 +613,7 @@ fn run_root_prelude(
             command: AdminCommands::List
         }
     ) {
-        cmd::collect_admin_list()
+        admin::server::collect_admin_list()
     } else {
         Vec::new()
     };
@@ -599,7 +624,7 @@ fn run_root_prelude(
             command: AdminCommands::Diagnose
         }
     ) {
-        Some(cmd::run_diagnostic())
+        Some(install::diagnose::run_diagnostic())
     } else {
         None
     };
@@ -610,12 +635,12 @@ fn run_root_prelude(
         command: AdminCommands::SaveNodeVersions { indices },
     } = command
     {
-        Some(cmd::save_node_versions(indices))
+        Some(admin::server::save_node_versions(indices))
     } else if let Commands::Admin {
         command: AdminCommands::SaveDefaultIsolated { isolated },
     } = command
     {
-        Some(cmd::save_default_isolated(*isolated))
+        Some(admin::server::save_default_isolated(*isolated))
     } else {
         None
     };
@@ -624,11 +649,11 @@ fn run_root_prelude(
     // (711) and the panel CGI runs as the web user, which cannot write there.
     let set_locale = match command {
         Commands::SetLocale { locale } => {
-            Some(cmd::set_locale_user(state_dir, locale, uid, gid))
+            Some(admin::locale::set_locale_user(state_dir, locale, uid, gid))
         }
         Commands::Admin {
             command: AdminCommands::SetLocale { locale },
-        } => Some(cmd::set_locale_global(locale)),
+        } => Some(admin::locale::set_locale_global(locale)),
         _ => None,
     };
 
@@ -658,34 +683,41 @@ fn dispatch(
     // A failed `.app` write means the command cannot have taken effect; report
     // it instead of running the rest as if the metadata were there.
     if let Some(Err((code, msg))) = prelude.app_file_result {
-        output::user_error(&code, &msg);
+        sys::output::user_error(&code, &msg);
     }
 
     match command {
         Commands::List => cmd::cmd_list(state_dir, dbg),
         Commands::Status { name } => cmd::cmd_status(state_dir, &name, dbg),
-        Commands::Stats { name } => cmd::cmd_stats(state_dir, &name, username, prelude.da_limits, dbg),
-        Commands::Netguard { .. } => cmd::netguard::report(prelude.netguard_stopped, dbg),
+        Commands::Stats { name } => limits::usage::cmd_stats(state_dir, &name, username, prelude.da_limits, dbg),
+        Commands::Netguard { .. } => limits::netguard::report(prelude.netguard_stopped, dbg),
         // Handled before the privilege drop, in `run_server_wide`; the match
         // has to name it even though it never arrives here.
-        Commands::BootRecover | Commands::SyncProxy | Commands::Setup | Commands::Teardown => output::system_error(
+        Commands::BootRecover | Commands::SyncProxy | Commands::Setup | Commands::Teardown => sys::output::system_error(
             "internal",
             "server-wide commands run before the privilege drop",
         ),
         Commands::StatusIsolated => cmd::cmd_status_isolated(state_dir, dbg),
         Commands::SetIsolated { isolated } => match prelude.isolation_switch {
-            Some(Ok(restarted)) => cmd::cmd_set_isolated(isolated, restarted, dbg),
-            Some(Err((code, msg))) => output::user_error(&code, &msg),
-            None => output::system_error("internal", "isolation switch result missing"),
+            Some(Ok(switch)) => cmd::cmd_set_isolated(isolated, switch, dbg),
+            Some(Err((code, msg))) => sys::output::user_error(&code, &msg),
+            None => sys::output::system_error("internal", "isolation switch result missing"),
         },
         Commands::SetMemoryMax { name, megabytes } => {
             cmd::cmd_set_memory_max(state_dir, &name, megabytes, dbg)
         }
         Commands::Start { name } => {
-            cmd::cmd_start(state_dir, &name, web_user, prelude.spawned_pid, dbg)
+            cmd::cmd_start(state_dir, &name, username, web_user, prelude.spawned_pid, dbg)
         }
         Commands::Stop { name, timeout } => cmd::cmd_stop(state_dir, &name, timeout, dbg),
-        Commands::Restart { name } => cmd::cmd_restart(state_dir, &name, web_user, dbg),
+        Commands::Restart { name } => cmd::cmd_restart(
+            state_dir,
+            &name,
+            username,
+            web_user,
+            prelude.spawned_pid,
+            dbg,
+        ),
         Commands::Add {
             name,
             app_type,
@@ -737,13 +769,13 @@ fn dispatch(
         }
         Commands::Admin {
             command: AdminCommands::List,
-        } => cmd::cmd_admin_list(&prelude.admin_apps, dbg),
+        } => admin::server::cmd_admin_list(&prelude.admin_apps, dbg),
         Commands::Admin {
             command: AdminCommands::Diagnose,
         } => emit_prelude_result(prelude.diagnostic, "diagnostic result missing", dbg),
         Commands::Admin {
             command: AdminCommands::DetectNodes,
-        } => cmd::cmd_admin_detect_nodes(dbg),
+        } => admin::server::cmd_admin_detect_nodes(dbg),
         Commands::Admin {
             command: AdminCommands::SaveNodeVersions { .. },
         } => emit_prelude_result(
@@ -768,14 +800,21 @@ fn dispatch(
     }
 }
 
-/// Emits a JSON result computed in the root prelude. `run_root_prelude`
-/// populates `result` for the matching command, so `None` is a programming bug.
+/// Emits a JSON result computed in the root prelude.
+///
+/// `run_root_prelude` fills `result` in for the command being dispatched, so
+/// `None` means the two drifted apart — a bug here, not a bad request. It is
+/// still reported as JSON rather than panicking: this binary's only caller is
+/// the panel's PHP layer, which parses stdout, and a panic would leave it with
+/// an empty body and no way to tell the user anything.
 fn emit_prelude_result(
     result: Option<Result<serde_json::Value, (String, String)>>,
     missing_msg: &str,
     dbg: Option<&serde_json::Value>,
 ) -> ! {
-    let outcome = result.expect(missing_msg);
+    let Some(outcome) = result else {
+        sys::output::system_error("internal", missing_msg);
+    };
     match outcome {
         Ok(val) => {
             let mut obj = serde_json::Map::new();
@@ -789,7 +828,7 @@ fn emit_prelude_result(
             println!("{}", serde_json::Value::Object(obj));
             std::process::exit(0);
         }
-        Err((error, message)) => output::user_error(&error, &message),
+        Err((error, message)) => sys::output::user_error(&error, &message),
     }
 }
 
@@ -834,4 +873,40 @@ fn build_debug_base(
         "home": home,
         "state_dir": sd,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Commands, spawns_into_scope, wants_da_limits};
+
+    /// `Restart` must be treated exactly like `Start` on the privileged paths.
+    ///
+    /// It once was not: it read no account limits and never reached
+    /// `spawn_into_scope`, so `cmd_restart` fell through to spawning the app
+    /// after the privilege drop. The app then ran outside systemd entirely —
+    /// no scope, no slice, no memory cap, and invisible to the netguard sweep,
+    /// which finds processes by walking cgroups. A restarted app was a
+    /// different, less contained thing than a started one.
+    #[test]
+    fn restart_is_privileged_exactly_like_start() {
+        let start = Commands::Start { name: "api".into() };
+        let restart = Commands::Restart { name: "api".into() };
+
+        assert_eq!(wants_da_limits(&start), wants_da_limits(&restart));
+        assert_eq!(spawns_into_scope(&start), spawns_into_scope(&restart));
+
+        assert!(wants_da_limits(&restart), "restart needs the account cap");
+        assert!(spawns_into_scope(&restart), "restart needs its own scope");
+    }
+
+    /// A command that neither starts nor restarts must not be dragged onto the
+    /// spawn path by a predicate that is too broad.
+    #[test]
+    fn other_commands_do_not_spawn() {
+        assert!(!spawns_into_scope(&Commands::List));
+        assert!(!spawns_into_scope(&Commands::Stop {
+            name: "api".into(),
+            timeout: 10,
+        }));
+    }
 }

@@ -13,6 +13,8 @@
 //! past their share. Handing out a fixed, equal slice instead — the previous
 //! model — reserved memory nobody was using and refused momentary peaks.
 
+use std::path::Path;
+
 /// Smallest guarantee an app gets. Node needs roughly 30–50 MB just to start,
 /// so anything below this produces an app that cannot run.
 const FLOOR: u64 = 48 * 1024 * 1024;
@@ -45,12 +47,12 @@ pub const fn slice_cap(account_limit: u64) -> u64 {
 }
 
 /// systemd unit name of the account's slice.
-pub fn slice_unit_name(username: &str) -> String {
+pub(crate) fn slice_unit_name(username: &str) -> String {
     format!("selynt-{username}.slice")
 }
 
 /// cgroup path of the account's slice.
-pub fn slice_cgroup(username: &str) -> String {
+pub(crate) fn slice_cgroup(username: &str) -> String {
     format!(
         "/sys/fs/cgroup/selynt.slice/{}",
         slice_unit_name(username)
@@ -62,7 +64,7 @@ pub fn slice_cgroup(username: &str) -> String {
 /// `pool` is [`slice_cap`], `running` counts the apps sharing it (including
 /// this one), and `pinned` is the ceiling the user chose, if any — a pin only
 /// ever narrows what the app may take.
-pub fn app_limits(pool: u64, running: usize, pinned: Option<u64>) -> AppLimits {
+pub(crate) fn app_limits(pool: u64, running: usize, pinned: Option<u64>) -> AppLimits {
     let fair = pool / running.max(1) as u64;
 
     // Reach well past the fair share when there is room. The slice is what
@@ -87,6 +89,15 @@ pub fn app_limits(pool: u64, running: usize, pinned: Option<u64>) -> AppLimits {
     let high = max.saturating_sub(HEADROOM).max(min);
 
     AppLimits { min, high, max }
+}
+
+/// True when this host can place apps in their own systemd scope.
+///
+/// Requires `systemd-run` and a live system manager — a container without
+/// systemd as PID 1 has the binary but no bus to talk to.
+pub(crate) fn can_run_scopes() -> bool {
+    Path::new("/run/systemd/system").is_dir()
+        && (Path::new("/usr/bin/systemd-run").exists() || Path::new("/bin/systemd-run").exists())
 }
 
 #[cfg(test)]

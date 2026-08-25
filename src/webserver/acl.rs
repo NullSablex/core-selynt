@@ -2,12 +2,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use crate::output::debug;
+use crate::sys::output::debug;
 
 /// Grants the web user the minimum access required to reach an app's Unix
 /// socket and proxy marker. Tries `setfacl` first; if it is unavailable or
 /// fails, falls back to `chmod` with permissive-but-still-restricted modes.
-pub fn apply_acl(state_dir: &Path, socket_path: &Path, marker_path: &Path, web_user: &str) {
+pub(crate) fn apply_acl(state_dir: &Path, socket_path: &Path, marker_path: &Path, web_user: &str) {
     if web_user.is_empty() {
         debug("no web_user configured — skipping ACL");
         return;
@@ -24,7 +24,14 @@ pub fn apply_acl(state_dir: &Path, socket_path: &Path, marker_path: &Path, web_u
         marker_path,
         web_user,
     ) {
-        debug("setfacl failed — falling back to chmod");
+        // Worth stating plainly: the fallback cannot name the web user, so it
+        // opens directory traverse to every account instead of just one. An
+        // operator seeing this should install `acl` rather than accept it.
+        debug(
+            "setfacl failed — falling back to chmod: directory traverse will be \
+             granted to all accounts, not only the web user. Install the 'acl' \
+             package to restore per-account isolation.",
+        );
         fallback_chmod(
             state_dir,
             &sockets_dir,
@@ -75,8 +82,18 @@ fn try_setfacl(
         && setfacl(marker_path, &read_only)
 }
 
-/// `chmod` fallback when `setfacl` is unavailable: `711` on the directories
-/// (other-traverse only), `600` on the socket, `604` on the marker.
+/// `chmod` fallback when `setfacl` is unavailable.
+///
+/// **This is weaker than the ACL path and deliberately noisy about it.** An ACL
+/// names the web user: `u:apache:--x` lets exactly one account traverse. A mode
+/// bit cannot name anyone, so `711` grants traverse to *every* account on the
+/// server — the per-account boundary the state dir exists to draw. The socket
+/// stays `600` and the marker `604`, so a neighbour still cannot read or write
+/// an app's socket; what it loses is the directory-level opacity.
+///
+/// Reached only when `setfacl` is missing or fails. On a supported host the ACL
+/// path always wins, which is why this is a warning rather than a refusal:
+/// leaving every app unreachable would be worse than a wider traverse bit.
 fn fallback_chmod(
     state_dir: &Path,
     sockets_dir: &Path,

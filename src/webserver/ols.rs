@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::state::{DA_TEMPLATES, PLUGIN_PATH, STATE_BASE};
+use crate::sys::state::{DA_TEMPLATES, PLUGIN_PATH, STATE_BASE};
 
 /// Delimiters of the block the panel owns inside a shared template file.
 ///
@@ -57,7 +57,7 @@ RewriteRule ^(.*)$ http://selynt_proxy-|SDOMAIN|-|VH_PORT|/$1 [P,L,E=PROXY-HOST:
 ///
 /// DirectAdmin 1.690+ installs it under `/etc/openlitespeed`; older builds keep
 /// it in `/usr/local/lsws/conf`.
-pub fn conf_dir() -> Option<&'static Path> {
+pub(crate) fn conf_dir() -> Option<&'static Path> {
     ["/etc/openlitespeed", "/usr/local/lsws/conf"]
         .into_iter()
         .map(Path::new)
@@ -65,7 +65,7 @@ pub fn conf_dir() -> Option<&'static Path> {
 }
 
 /// The main configuration file, when OpenLiteSpeed is installed.
-pub fn main_conf() -> Option<PathBuf> {
+pub(crate) fn main_conf() -> Option<PathBuf> {
     conf_dir().map(|d| d.join("httpd_config.conf"))
 }
 
@@ -101,8 +101,8 @@ fn upsert_block(path: &Path, block: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::state::atomic_write(path, content.as_bytes()).map_err(std::io::Error::other)?;
-    crate::state::set_perm(path, 0o644).map_err(std::io::Error::other)
+    crate::sys::fs::atomic_write(path, content.as_bytes()).map_err(std::io::Error::other)?;
+    crate::sys::fs::set_perm(path, 0o644).map_err(std::io::Error::other)
 }
 
 /// The account OpenLiteSpeed runs as, which is what the socket ACL is granted
@@ -130,7 +130,7 @@ fn detect_web_user() -> Option<String> {
                 // The name has to belong to an account that exists: the socket
                 // ACL is granted to it, and granting it to nobody at all would
                 // leave every app unreachable with no error to point at.
-                if !user.is_empty() && crate::state::user_exists(user) {
+                if !user.is_empty() && crate::sys::auth::user_exists(user) {
                     return Some(user.to_string());
                 }
             }
@@ -139,7 +139,7 @@ fn detect_web_user() -> Option<String> {
 
     ["apache", "lsws", "www-data", "nginx", "nobody"]
         .into_iter()
-        .find(|u| crate::state::user_exists(u))
+        .find(|u| crate::sys::auth::user_exists(u))
         .map(ToString::to_string)
 }
 
@@ -147,7 +147,7 @@ fn detect_web_user() -> Option<String> {
 ///
 /// Installing a template changes nothing on its own — the vhosts already on
 /// disk were generated from the previous version.
-pub fn rebuild_vhosts() -> bool {
+pub(crate) fn rebuild_vhosts() -> bool {
     let custombuild = Path::new("/usr/local/directadmin/custombuild");
     if custombuild.join("build").is_file() {
         return std::process::Command::new("./build")
@@ -176,7 +176,7 @@ pub struct Outcome {
 }
 
 /// Installs the templates and records the web server's user.
-pub fn run() -> Result<Outcome, (String, String)> {
+pub(crate) fn run() -> Result<Outcome, (String, String)> {
     if conf_dir().is_none() {
         return Err((
             "ols_missing".into(),
@@ -198,15 +198,15 @@ pub fn run() -> Result<Outcome, (String, String)> {
     };
 
     // The web server has to traverse this to reach each account's socket.
-    let _ = crate::state::set_perm(Path::new(STATE_BASE), 0o711);
+    let _ = crate::sys::fs::set_perm(Path::new(STATE_BASE), 0o711);
 
     let web_user = detect_web_user();
     if let Some(user) = &web_user {
         let etc = Path::new(PLUGIN_PATH).join("etc");
         let _ = std::fs::create_dir_all(&etc);
         let file = etc.join("ols_web_user");
-        crate::state::atomic_write(&file, format!("{user}\n").as_bytes())
-            .and_then(|()| crate::state::set_perm(&file, 0o644))
+        crate::sys::fs::atomic_write(&file, format!("{user}\n").as_bytes())
+            .and_then(|()| crate::sys::fs::set_perm(&file, 0o644))
             .map_err(|e| ("web_user_write_failed".to_string(), format!("{e:#}")))?;
     }
 

@@ -39,7 +39,7 @@ fn is_externally_bound(local_addr: &str) -> bool {
     }
 }
 
-pub fn read_proc_uid(pid: u32) -> Option<u32> {
+pub(crate) fn read_proc_uid(pid: u32) -> Option<u32> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     content
         .lines()
@@ -51,19 +51,19 @@ pub fn read_proc_uid(pid: u32) -> Option<u32> {
 ///
 /// The `comm` field can contain spaces and parentheses, so we use `rfind(')')`
 /// to locate its end before tokenising the rest of the line.
-pub fn read_proc_starttime(pid: u32) -> Option<u64> {
+pub(crate) fn read_proc_starttime(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_paren = content.rfind(')')?;
     let rest = &content[after_paren + 2..];
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-pub fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// Sum of `utime + stime` from `/proc/{pid}/stat` — total CPU ticks consumed.
-pub fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
+pub(crate) fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_paren = content.rfind(')')?;
     let rest = &content[after_paren + 2..];
@@ -74,7 +74,7 @@ pub fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
 }
 
 /// `VmRSS` in kilobytes from `/proc/{pid}/status`.
-pub fn read_proc_rss_kb(pid: u32) -> Option<u64> {
+pub(crate) fn read_proc_rss_kb(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     content
         .lines()
@@ -88,24 +88,10 @@ pub struct ProcessSnapshot {
     pub rss_kb: u64,
 }
 
-pub fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+pub(crate) fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let cpu_ticks = read_proc_cpu_ticks(pid)?;
     let rss_kb = read_proc_rss_kb(pid).unwrap_or_default();
     Some(ProcessSnapshot { cpu_ticks, rss_kb })
-}
-
-/// Reports whether the process is listening on any TCP or UDP socket.
-///
-/// We walk `/proc/{pid}/fd/`, collect the inodes of every socket FD, then scan
-/// `/proc/net/{tcp,tcp6,udp,udp6}` and match against those inodes. UDP entries
-/// are treated as listening because UDP has no `LISTEN` state — any bound
-/// socket counts.
-pub fn has_network_listen(pid: u32) -> bool {
-    let socket_inodes = socket_inodes_of(pid);
-    if socket_inodes.is_empty() {
-        return false;
-    }
-    socket_inodes_are_bound(&socket_inodes, false)
 }
 
 /// Whether any of `socket_inodes` is a listening/bound network socket.
@@ -179,7 +165,7 @@ fn socket_inodes_of(pid: u32) -> HashSet<u64> {
 ///
 /// A sandboxed app sits under a bwrap process, and bwrap does not pass signals
 /// on to it, so stopping the app means signalling the children too.
-pub fn descendants_of(pid: u32) -> Vec<u32> {
+pub(crate) fn descendants_of(pid: u32) -> Vec<u32> {
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
@@ -221,7 +207,7 @@ fn read_proc_ppid(pid: u32) -> Option<u32> {
 /// covers the app's own process, so a child spawned without it — or an app that
 /// is not Node at all — can bind freely. Passing every PID in the app's cgroup
 /// closes that path.
-pub fn has_external_listen(pids: &[u32]) -> bool {
+pub(crate) fn has_external_listen(pids: &[u32]) -> bool {
     let mut socket_inodes: HashSet<u64> = HashSet::new();
     for &pid in pids {
         socket_inodes.extend(socket_inodes_of(pid));
@@ -238,6 +224,17 @@ mod tests {
 
     /// Addresses come from `/proc/net/*` in hex, little-endian. These are the
     /// exact strings the kernel produced on a live server.
+    /// Start and the netguard sweep enforce one policy and must agree on it.
+    /// Start once checked *every* bind, so an app listening on 127.0.0.1 was
+    /// refused at start while the sweep would have left it running — the same
+    /// app allowed or forbidden depending on when it opened the socket.
+    #[test]
+    fn loopback_is_allowed_by_the_same_rule_everywhere() {
+        // What start rejects must be exactly what the sweep stops.
+        assert!(!is_externally_bound("0100007F:4A57"));
+        assert!(is_externally_bound("00000000:1F90"));
+    }
+
     #[test]
     fn ipv4_loopback_is_internal() {
         // 127.0.0.1:19031 — an app talking to itself.

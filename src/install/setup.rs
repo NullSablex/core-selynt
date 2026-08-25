@@ -13,10 +13,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::output::success;
-use crate::state::{PLUGIN_PATH, STATE_BASE, atomic_write, set_perm, user_exists};
+use crate::sys::output::success;
+use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
+use crate::sys::auth::user_exists;
+use crate::sys::fs::{atomic_write, set_perm};
 
-use super::with_debug;
+use crate::cmd::with_debug;
 
 /// Accounts the panel needs to know about, resolved from the running system.
 struct Identities {
@@ -40,7 +42,7 @@ fn detect_da_user() -> String {
     // Owner of the binary, which is what DirectAdmin installs as itself.
     if let Ok(md) = std::fs::metadata("/usr/local/directadmin/directadmin") {
         use std::os::unix::fs::MetadataExt;
-        if let Some(name) = crate::state::lookup_uid(md.uid()) {
+        if let Some(name) = crate::sys::auth::lookup_uid(md.uid()) {
             return name;
         }
     }
@@ -68,9 +70,9 @@ fn detect_cgi_user() -> Option<String> {
             continue;
         }
 
-        if let Some(uid) = crate::proc::read_proc_uid(pid)
+        if let Some(uid) = crate::sys::proc::read_proc_uid(pid)
             && uid != 0
-            && let Some(name) = crate::state::lookup_uid(uid)
+            && let Some(name) = crate::sys::auth::lookup_uid(uid)
         {
             return Some(name);
         }
@@ -82,7 +84,7 @@ fn detect_cgi_user() -> Option<String> {
 fn detect_identities() -> Identities {
     let da_user = detect_da_user();
     Identities {
-        da_uid: crate::state::lookup_user_ids(&da_user).map(|(uid, _)| uid),
+        da_uid: crate::sys::auth::lookup_user_ids(&da_user).map(|(uid, _)| uid),
         da_user,
         cgi_user: detect_cgi_user(),
     }
@@ -108,7 +110,7 @@ fn prepare_state_dir(owner_uid: Option<u32>) -> Result<(), String> {
     std::fs::create_dir_all(&base).map_err(|e| format!("{e:#}"))?;
 
     if let Some(uid) = owner_uid {
-        let _ = crate::state::chown_path(&base, uid, uid);
+        let _ = crate::sys::fs::chown_path(&base, uid, uid);
     }
     set_perm(&base, 0o711).map_err(|e| format!("{e:#}"))
 }
@@ -134,13 +136,13 @@ fn apply_ownership() -> Result<(), String> {
     let mut failed = 0usize;
 
     // Directories need the execute bit to be traversable at all.
-    super::diagnose::walk_dirs(root, &mut |dir| {
+    super::tree::walk_dirs(root, &mut |dir| {
         if set_perm(dir, 0o755).is_err() {
             failed += 1;
         }
     });
-    super::diagnose::walk(root, &mut |file| {
-        if set_perm(file, super::diagnose::expected_mode(file)).is_err() {
+    super::tree::walk(root, &mut |file| {
+        if set_perm(file, super::tree::expected_mode(file)).is_err() {
             failed += 1;
         }
     });
@@ -153,7 +155,7 @@ fn apply_ownership() -> Result<(), String> {
     // Without it every privileged action fails at runtime with `root_required`.
     let bin = root.join("bin/core-selynt");
     if bin.is_file() {
-        crate::state::chown_path(&bin, 0, 0).map_err(|e| format!("{e:#}"))?;
+        crate::sys::fs::chown_path(&bin, 0, 0).map_err(|e| format!("{e:#}"))?;
         set_perm(&bin, 0o4755).map_err(|e| format!("{e:#}"))?;
     }
 
@@ -162,7 +164,7 @@ fn apply_ownership() -> Result<(), String> {
 
 /// Gives every file and directory under `root` to root.
 fn chown_tree(root: &Path) -> std::io::Result<()> {
-    crate::state::chown_path(root, 0, 0).map_err(std::io::Error::other)?;
+    crate::sys::fs::chown_path(root, 0, 0).map_err(std::io::Error::other)?;
 
     let Ok(entries) = std::fs::read_dir(root) else {
         return Ok(());
@@ -177,14 +179,14 @@ fn chown_tree(root: &Path) -> std::io::Result<()> {
         if meta.is_dir() {
             chown_tree(&path)?;
         } else if meta.is_file() {
-            crate::state::chown_path(&path, 0, 0).map_err(std::io::Error::other)?;
+            crate::sys::fs::chown_path(&path, 0, 0).map_err(std::io::Error::other)?;
         }
     }
     Ok(())
 }
 
 /// Records the accounts and prepares the state directory.
-pub fn run() -> Result<Value, (String, String)> {
+pub(crate) fn run() -> Result<Value, (String, String)> {
     let ids = detect_identities();
 
     write_etc("da_user", &ids.da_user).map_err(|e| ("write_failed".to_string(), e))?;
@@ -201,7 +203,7 @@ pub fn run() -> Result<Value, (String, String)> {
     // Wiring the web server is the other half of the same job, and it needs the
     // state directory to exist first. Reported separately so a server without
     // OpenLiteSpeed still records its accounts instead of failing outright.
-    let ols = super::ols::run().map_or_else(
+    let ols = crate::webserver::ols::run().map_or_else(
         |(code, msg)| json!({ "ok": false, "error": code, "message": msg }),
         |o| json!({ "ok": true, "web_user": o.web_user, "vhosts_rebuilt": o.vhosts_rebuilt }),
     );
@@ -220,9 +222,9 @@ pub fn run() -> Result<Value, (String, String)> {
 }
 
 /// CLI entry point.
-pub fn cmd_setup(dbg: Option<&Value>) -> ! {
+pub(crate) fn cmd_setup(dbg: Option<&Value>) -> ! {
     match run() {
         Ok(v) => success(with_debug(v, dbg)),
-        Err((code, msg)) => crate::output::system_error(&code, &msg),
+        Err((code, msg)) => crate::sys::output::system_error(&code, &msg),
     }
 }

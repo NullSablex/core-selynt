@@ -1,38 +1,14 @@
-mod admin;
-mod locale;
 mod manage;
-mod diagnose;
-pub use diagnose::run_diagnostic;
-mod memory;
-mod node;
 pub mod appfile;
 pub mod boot;
-pub mod netguard;
-pub mod ols;
-pub mod proxysync;
-pub mod runtime;
-pub mod setup;
-pub mod teardown;
-pub mod units;
-pub mod sandbox;
 mod start;
-pub(crate) mod stats;
 
-pub use admin::{
-    cmd_admin_detect_nodes, cmd_admin_list, collect_admin_list, save_default_isolated, save_node_versions,
-};
-pub use locale::{set_locale_global, set_locale_user};
 pub use manage::{
     apply_memory_max, cmd_set_memory_max,
     AddArgs, cmd_add, cmd_domains, cmd_list, cmd_logs, cmd_remove, cmd_restart,
-    cmd_set_isolated, switch_isolation, cmd_set_node_version, cmd_status, cmd_status_isolated, cmd_stop,
+    IsolationSwitch, cmd_set_isolated, switch_isolation, cmd_set_node_version, cmd_status, cmd_status_isolated, cmd_stop,
 };
 pub use start::{cmd_start, spawn_into_scope};
-pub use stats::{
-    DaLimits, cmd_stats, ensure_slice_cap, read_da_limits, reapply_app_limits,
-    reapply_app_limits_excluding,
-    reapply_app_limits_including,
-};
 
 use std::path::Path;
 
@@ -42,8 +18,9 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
 
-use crate::proc::{is_process_alive, read_proc_starttime, read_proc_uid};
-use crate::state::{AppMeta, SYNC_MARKER, parse_kv};
+use crate::sys::proc::{is_process_alive, read_proc_starttime, read_proc_uid};
+use crate::sys::state::{AppMeta, SYNC_MARKER};
+use crate::sys::fs::parse_kv;
 
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -75,7 +52,7 @@ pub fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
 ///
 /// Returns whether the app started.
 pub fn start_app_detached(username: &str, name: &str) -> bool {
-    std::process::Command::new(format!("{}/bin/core-selynt", crate::state::PLUGIN_PATH))
+    std::process::Command::new(format!("{}/bin/core-selynt", crate::sys::state::PLUGIN_PATH))
         .arg("start")
         .arg(name)
         .env("USERNAME", username)
@@ -171,7 +148,7 @@ pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs:
     // is bwrap's. It does not forward signals, so terminating only that pid
     // leaves the real process orphaned — still holding its socket. Collect the
     // descendants up front, while the parent links still exist.
-    let descendants = crate::proc::descendants_of(pid);
+    let descendants = crate::sys::proc::descendants_of(pid);
 
     // Remove the marker first so the proxy stops routing before we kill.
     let marker = state_dir.join(".proxy").join(&meta.host);
@@ -198,7 +175,7 @@ pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs:
         }
     }
 
-    let _ = std::fs::remove_file(crate::state::active_socket_path(state_dir, meta));
+    let _ = std::fs::remove_file(crate::sys::state::active_socket_path(state_dir, meta));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.pid")));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.meta")));
 }

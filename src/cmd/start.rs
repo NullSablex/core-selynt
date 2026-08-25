@@ -8,16 +8,17 @@ use std::str::FromStr;
 use nix::sys::signal::{Signal, kill};
 use serde_json::{Value, json};
 
-use crate::acl::apply_acl;
-use super::runtime::Runtime;
-use crate::output::{debug, success, system_error, user_error};
-use crate::proc::{
-    ProcessSnapshot, has_network_listen, is_process_alive, read_proc_snapshot, read_proc_starttime,
+use crate::webserver::acl::apply_acl;
+use crate::runtime::kind::Runtime;
+use crate::sys::output::{debug, success, system_error, user_error};
+use crate::sys::proc::{
+    ProcessSnapshot, has_external_listen, is_process_alive, read_proc_snapshot, read_proc_starttime,
 };
-use crate::state::{AppMeta, PLUGIN_PATH, atomic_write, load_app_meta, set_perm, socket_path_for};
+use crate::sys::state::{AppMeta, PLUGIN_PATH, load_app_meta, socket_path_for};
+use crate::sys::fs::{atomic_write, set_perm};
 
 use super::manage::rotate_log_if_needed;
-use super::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
+use crate::runtime::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
 use super::{get_status, signal_sync, to_nix_pid, validate_safe_component, with_debug};
 
 /// Absolute ceiling for socket creation (any app type).
@@ -40,11 +41,35 @@ const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const KILL_GRACE: Duration = Duration::from_millis(500);
 
 const NETWORK_PORT_FORBIDDEN_MSG: &str =
-    "process opened a network port (TCP/UDP) — only Unix sockets are allowed";
+    "process opened an externally reachable network port — only Unix sockets are allowed";
+
+/// Whether the app has bound a port reachable from off the host.
+///
+/// Two things this must get right, both learned from the netguard sweep:
+///
+/// * **Loopback is allowed.** An app talking to itself — a local cache, IPC
+///   between its own workers — harms nobody; only a port that bypasses the
+///   proxy is forbidden. Checking every bind instead refused apps at start that
+///   the sweep would then happily leave running: the two halves of one policy
+///   disagreeing.
+/// * **The whole cgroup counts, not just the main process.** A child spawned
+///   without the Node loader can bind anything, which is exactly why the sweep
+///   walks the cgroup. Looking only at the app's own pid let that child through
+///   until the next sweep noticed it.
+fn app_has_external_port(username: &str, name: &str, pid: u32) -> bool {
+    let pids = match crate::limits::usage::scope_pids(username, name) {
+        // No cgroup (systemd unavailable, or the scope is not up yet): the
+        // app's own process is all there is to look at.
+        p if p.is_empty() => vec![pid],
+        p => p,
+    };
+    has_external_listen(&pids)
+}
 
 pub fn cmd_start(
     state_dir: &Path,
     name: &str,
+    username: &str,
     web_user: &str,
     spawned_pid: Option<u32>,
     dbg: Option<&Value>,
@@ -89,7 +114,7 @@ pub fn cmd_start(
             &socket_path,
             None,
             None,
-            crate::state::account_is_isolated(state_dir),
+            crate::sys::state::account_is_isolated(state_dir),
         ),
     };
 
@@ -100,6 +125,8 @@ pub fn cmd_start(
 
     let ctx = WaitContext {
         pid,
+        username,
+        name,
         socket_path: &socket_path,
         pid_file: &pid_file,
         meta_file: &meta_file,
@@ -107,7 +134,7 @@ pub fn cmd_start(
     wait_for_socket_file(&ctx);
     wait_for_socket_accept(&ctx);
 
-    if has_network_listen(pid) {
+    if app_has_external_port(username, name, pid) {
         let nix_pid = to_nix_pid(pid);
         let _ = kill(nix_pid, Signal::SIGTERM);
         std::thread::sleep(KILL_GRACE);
@@ -151,7 +178,7 @@ pub fn spawn_into_scope(
     uid: u32,
     gid: u32,
 ) -> Option<u32> {
-    if !systemd_available() {
+    if !crate::limits::policy::can_run_scopes() {
         return None;
     }
     let socket_path = socket_path_for(state_dir, meta);
@@ -159,7 +186,7 @@ pub fn spawn_into_scope(
 
     // Resolve the cap here, in the root prelude: it needs the account's
     // allowance from DirectAdmin (root-only) plus every sibling app's setting.
-    let limits = super::stats::app_limits_for(state_dir, username, name, meta);
+    let limits = crate::limits::usage::app_limits_for(state_dir, username, name, meta);
 
     Some(spawn_app(
         meta,
@@ -167,7 +194,7 @@ pub fn spawn_into_scope(
         &socket_path,
         Some((username, uid, gid)),
         limits,
-        crate::state::account_is_isolated(state_dir),
+        crate::sys::state::account_is_isolated(state_dir),
     ))
 }
 
@@ -176,7 +203,7 @@ fn spawn_app(
     name: &str,
     socket_path: &Path,
     scope: Option<(&str, u32, u32)>,
-    limits: Option<super::memory::AppLimits>,
+    limits: Option<crate::limits::policy::AppLimits>,
     isolated: bool,
 ) -> u32 {
     let cwd_path = PathBuf::from(&meta.cwd);
@@ -223,7 +250,7 @@ fn spawn_app(
         let _ = std::fs::create_dir_all(socket_dir);
         let _ = set_perm(socket_dir, 0o750);
         if let Some((_, uid, gid)) = scope {
-            let _ = crate::state::chown_path(socket_dir, uid, gid);
+            let _ = crate::sys::fs::chown_path(socket_dir, uid, gid);
         }
     }
 
@@ -236,8 +263,8 @@ fn spawn_app(
     if isolated
         && let Some(socket_dir) = socket_path.parent()
     {
-        if super::sandbox::available() {
-            cmd = super::sandbox::wrap(cmd, &cwd_path, socket_dir);
+        if crate::limits::sandbox::available() {
+            cmd = crate::limits::sandbox::wrap(cmd, &cwd_path, socket_dir);
         } else {
             // Isolation was accepted when it was switched on, so losing it here
             // means the host changed underneath — bubblewrap removed, or user
@@ -245,7 +272,7 @@ fn spawn_app(
             // the account less separation than it is being told it has.
             user_error(
                 "sandbox_unavailable",
-                super::sandbox::unavailable_reason(),
+                crate::limits::sandbox::unavailable_reason(),
             );
         }
     }
@@ -260,7 +287,7 @@ fn spawn_app(
     // die with whatever process happened to start it. Falls back to a bare
     // spawn elsewhere.
     if let Some((username, uid, gid)) = scope
-        && systemd_available()
+        && crate::limits::policy::can_run_scopes()
     {
         cmd = wrap_in_scope(cmd, username, name, uid, gid, limits);
     }
@@ -341,14 +368,6 @@ fn scope_unit_name(username: &str, name: &str) -> String {
     format!("selynt-{username}-{name}.scope")
 }
 
-/// True when this host can place apps in their own systemd scope.
-///
-/// Requires `systemd-run` and a live system manager — a container without
-/// systemd as PID 1 has the binary but no bus to talk to.
-pub(super) fn systemd_available() -> bool {
-    Path::new("/run/systemd/system").is_dir()
-        && (Path::new("/usr/bin/systemd-run").exists() || Path::new("/bin/systemd-run").exists())
-}
 
 /// Wraps `cmd` in `systemd-run --scope` so the app lands in a cgroup of its own.
 ///
@@ -371,7 +390,7 @@ fn wrap_in_scope(
     name: &str,
     uid: u32,
     gid: u32,
-    limits: Option<super::memory::AppLimits>,
+    limits: Option<crate::limits::policy::AppLimits>,
 ) -> Command {
     let mut run = Command::new("systemd-run");
     run.arg("--scope")
@@ -380,7 +399,7 @@ fn wrap_in_scope(
         .arg(format!("--unit={}", scope_unit_name(username, name)))
         // The account's slice is the ceiling the kernel enforces over all of
         // its apps together; the per-app maxima below may exceed it on purpose.
-        .arg(format!("--slice={}", super::memory::slice_unit_name(username)))
+        .arg(format!("--slice={}", crate::limits::policy::slice_unit_name(username)))
         .arg(format!("--uid={uid}"))
         .arg(format!("--gid={gid}"))
         // Keep the app alive when systemd stops the unit that spawned it.
@@ -452,6 +471,10 @@ fn persist_state(
 
 struct WaitContext<'a> {
     pid: u32,
+    /// Needed to resolve the app's cgroup, so the port check covers every
+    /// process it spawned and not just its own.
+    username: &'a str,
+    name: &'a str,
     socket_path: &'a Path,
     pid_file: &'a Path,
     meta_file: &'a Path,
@@ -466,7 +489,7 @@ fn cleanup_failed(pid_file: &Path, meta_file: &Path, socket: Option<&Path>) {
 }
 
 fn check_failure_modes(ctx: &WaitContext<'_>, include_socket_cleanup: bool) {
-    if has_network_listen(ctx.pid) {
+    if app_has_external_port(ctx.username, ctx.name, ctx.pid) {
         let nix_pid = to_nix_pid(ctx.pid);
         let _ = kill(nix_pid, Signal::SIGTERM);
         std::thread::sleep(KILL_GRACE);
@@ -637,7 +660,7 @@ mod tests {
     /// ceiling lives, and the per-app maxima intentionally exceed it.
     #[test]
     fn wrap_in_scope_places_app_in_the_user_slice() {
-        let limits = super::super::memory::AppLimits {
+        let limits = crate::limits::policy::AppLimits {
             min: 64 * 1024 * 1024,
             high: 96 * 1024 * 1024,
             max: 128 * 1024 * 1024,

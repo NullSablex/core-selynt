@@ -17,10 +17,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::output::success;
-use crate::state::SYNC_MARKER;
+use crate::sys::output::{debug, success};
+use crate::sys::state::SYNC_MARKER;
 
-use super::with_debug;
+use super::ols;
+
+use crate::cmd::with_debug;
 
 const LOCK_FILE: &str = "/var/lib/selynt_panel/.sync.lock";
 
@@ -54,11 +56,17 @@ fn host_is_safe(host: &str) -> bool {
 /// `.sockets/<host>` would find nothing for it — leaving it with no handler and
 /// no way to receive traffic.
 fn collect_live_apps() -> Vec<LiveApp> {
-    let mut apps = Vec::new();
+    let mut apps: Vec<LiveApp> = Vec::new();
+    // The handler name is derived from the host alone, so two apps claiming the
+    // same one would emit two `extProcessor` blocks with an identical name.
+    // Nothing enforces host uniqueness — `add` only rejects a duplicate app
+    // *name*, and two accounts are free to register the same host — so the
+    // guard has to live here, where the config is written.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (state_dir, _username) in crate::state::list_accounts() {
-        for name in crate::state::list_app_names(&state_dir) {
-            let Ok(meta) = crate::state::load_app_meta(&state_dir, &name) else {
+    for (state_dir, _username) in crate::sys::state::list_accounts() {
+        for name in crate::sys::state::list_app_names(&state_dir) {
+            let Ok(meta) = crate::sys::state::load_app_meta(&state_dir, &name) else {
                 continue;
             };
             if !host_is_safe(&meta.host) {
@@ -72,8 +80,19 @@ fn collect_live_apps() -> Vec<LiveApp> {
             if !state_dir.join(".proxy").join(&meta.host).exists() {
                 continue;
             }
-            let socket = crate::state::active_socket_path(&state_dir, &meta);
+            let socket = crate::sys::state::active_socket_path(&state_dir, &meta);
             if !socket.exists() {
+                continue;
+            }
+
+            // First one wins, and the rest are skipped rather than appended:
+            // a config naming the same handler twice is not one the web server
+            // can be trusted to read the way the panel intends.
+            if !seen.insert(meta.host.clone()) {
+                debug(format!(
+                    "sync-proxy: host '{}' claimed by more than one app — keeping the first",
+                    meta.host
+                ));
                 continue;
             }
 
@@ -128,16 +147,16 @@ fn write_config(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))?;
     // Owned by the web server's config user where it exists, so a reload can
     // read it; root otherwise.
-    if let Some((uid, gid)) = crate::state::lookup_user_ids("lsadm") {
-        let _ = crate::state::chown_path(&tmp, uid, gid);
+    if let Some((uid, gid)) = crate::sys::auth::lookup_user_ids("lsadm") {
+        let _ = crate::sys::fs::chown_path(&tmp, uid, gid);
     } else {
-        let _ = crate::state::chown_path(&tmp, 0, 0);
+        let _ = crate::sys::fs::chown_path(&tmp, 0, 0);
     }
     std::fs::rename(&tmp, path)
 }
 
 /// Asks OpenLiteSpeed to pick up the new configuration.
-pub fn reload_web_server() -> bool {
+pub(crate) fn reload_web_server() -> bool {
     let restart = |program: &str, args: &[&str]| {
         std::process::Command::new(program)
             .args(args)
@@ -155,7 +174,7 @@ pub fn reload_web_server() -> bool {
 /// Returns how many apps were written, or `None` when another run holds the
 /// lock — cron fires every minute, and two rewrites at once would race over the
 /// same file.
-pub fn sync() -> Option<usize> {
+pub(crate) fn sync() -> Option<usize> {
     let _lock = Lock::acquire()?;
 
     // Independent of the routing, and done first so a web server that refuses
@@ -176,7 +195,7 @@ pub fn sync() -> Option<usize> {
         }
     }
 
-    let conf = super::ols::conf_dir()
+    let conf = ols::conf_dir()
         .unwrap_or_else(|| Path::new("/etc/openlitespeed"))
         .join("selynt_extprocessors.conf");
 
@@ -214,10 +233,10 @@ pub fn sync() -> Option<usize> {
 /// Cheap enough to do on each sweep: one file read and one `systemctl
 /// set-property` per account, and only when the value actually changed.
 fn reapply_account_limits() {
-    for (state_dir, username) in crate::state::list_accounts() {
-        let limits = super::read_da_limits(&username);
-        super::ensure_slice_cap(&username, limits.memory_max);
-        super::reapply_app_limits(&state_dir, &username);
+    for (state_dir, username) in crate::sys::state::list_accounts() {
+        let limits = crate::limits::usage::read_da_limits(&username);
+        crate::limits::usage::ensure_slice_cap(&username, limits.memory_max);
+        crate::limits::usage::reapply_app_limits(&state_dir, &username);
     }
 }
 
@@ -248,7 +267,7 @@ impl Lock {
 }
 
 /// CLI entry point.
-pub fn cmd_sync_proxy(dbg: Option<&Value>) -> ! {
+pub(crate) fn cmd_sync_proxy(dbg: Option<&Value>) -> ! {
     match sync() {
         Some(count) => success(with_debug(json!({ "apps": count }), dbg)),
         // Another run holds the lock and is about to write the same thing, or
@@ -277,6 +296,20 @@ mod tests {
         let a = "# h\nextProcessor one {\n}\n";
         let b = "# h\nextProcessor two {\n}\n";
         assert_ne!(strip_header(a), strip_header(b));
+    }
+
+    /// Two apps can claim the same host — `add` only rejects a duplicate app
+    /// name, and separate accounts never see each other's hosts. Emitting both
+    /// would put two `extProcessor` blocks with the same name in the config.
+    #[test]
+    fn a_host_claimed_twice_yields_one_handler() {
+        let mut seen = std::collections::HashSet::new();
+        let hosts = ["a.example.com", "b.example.com", "a.example.com"];
+        let kept: Vec<&str> = hosts
+            .into_iter()
+            .filter(|h| seen.insert(h.to_string()))
+            .collect();
+        assert_eq!(kept, ["a.example.com", "b.example.com"]);
     }
 
     /// The host becomes part of a handler name and of a path in the config.

@@ -7,7 +7,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::state::{PLUGIN_PATH, STATE_BASE, chown_path};
+use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
+use crate::sys::fs::chown_path;
 
 
 /// Validates a locale code against the dictionaries shipped under
@@ -41,14 +42,14 @@ fn invalid_locale_err() -> (String, String) {
 
 /// Persists the plugin-wide default language to `<STATE_BASE>/locale`. An empty
 /// `locale` clears it (falling back to the built-in default).
-pub fn set_locale_global(locale: &str) -> Result<Value, (String, String)> {
+pub(crate) fn set_locale_global(locale: &str) -> Result<Value, (String, String)> {
     let path = Path::new(STATE_BASE).join("locale");
     write_locale(&path, locale).map(|code| json!({ "global": code }))
 }
 
 /// Persists the current user's own language preference to
 /// `<state_dir>/locale`, owned by the user so the read path stays simple.
-pub fn set_locale_user(
+pub(crate) fn set_locale_user(
     state_dir: &Path,
     locale: &str,
     uid: u32,

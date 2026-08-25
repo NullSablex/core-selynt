@@ -13,8 +13,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::state::{DA_TEMPLATES, DA_USERS_BASE, PLUGIN_PATH, STATE_BASE};
-
+use crate::sys::state::{DA_TEMPLATES, DA_USERS_BASE, PLUGIN_PATH, STATE_BASE};
 
 /// Outcome of a single check.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,65 +65,6 @@ impl Report {
     }
 }
 
-/// Reads a file's permission bits as an octal number, e.g. `644`.
-fn mode_of(path: &Path) -> Option<u32> {
-    use std::os::unix::fs::MetadataExt;
-    Some(std::fs::metadata(path).ok()?.mode() & 0o7777)
-}
-
-/// The permissions a file under the plugin tree is expected to have.
-pub fn expected_mode(path: &Path) -> u32 {
-    let s = path.to_string_lossy();
-    if s.ends_with(".service") {
-        return 0o644;
-    }
-    if s.ends_with(".raw")
-        || s.ends_with(".html")
-        || (s.contains("/scripts/") && s.ends_with(".sh"))
-        || s.contains("/hooks/")
-    {
-        return 0o755;
-    }
-    0o644
-}
-
-/// Walks a directory tree, calling `visit` for every directory found.
-pub fn walk_dirs(dir: &Path, visit: &mut dyn FnMut(&Path)) {
-    visit(dir);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Same reason as `walk`: a symlinked directory would take the caller
-        // outside this tree, and changing permissions through it would land on
-        // whatever it points at.
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            walk_dirs(&path, visit);
-        }
-    }
-}
-
-/// Walks a directory tree, calling `visit` for every file found.
-pub fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Do not follow symlinks: a link could point anywhere, and the check
-        // is about this tree.
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if meta.is_dir() {
-            walk(&path, visit);
-        } else if meta.is_file() {
-            visit(&path);
-        }
-    }
-}
-
 fn check_binary(r: &mut Report) {
     use std::os::unix::fs::MetadataExt;
     let bin = Path::new(PLUGIN_PATH).join("bin/core-selynt");
@@ -151,7 +91,7 @@ fn check_ownership_and_modes(r: &mut Report) {
     let mut foreign = 0usize;
     let mut wrong_mode = Vec::new();
 
-    walk(root, &mut |p| {
+    super::tree::walk(root, &mut |p| {
         if p == bin || p == conf {
             return;
         }
@@ -160,8 +100,8 @@ fn check_ownership_and_modes(r: &mut Report) {
         {
             foreign += 1;
         }
-        if let Some(mode) = mode_of(p) {
-            let want = expected_mode(p);
+        if let Some(mode) = super::tree::mode_of(p) {
+            let want = super::tree::expected_mode(p);
             if mode != want {
                 wrong_mode.push(format!(
                     "{} ({mode:o}, expected {want:o})",
@@ -250,6 +190,50 @@ fn check_state_dir(r: &mut Report) {
     for path in unowned {
         r.add(Level::Warn, "state", "app_not_owned", Some(path));
     }
+
+    check_acl_support(r);
+}
+
+/// Checks that the per-account boundary is enforced by ACL rather than by mode
+/// bits.
+///
+/// The panel grants the web server access to an app's socket with
+/// `setfacl u:<web_user>:--x`, which names exactly one account. Without
+/// `setfacl` it falls back to `chmod 711`, and a mode bit cannot name anyone —
+/// traverse opens to *every* account on the server. Apps keep working either
+/// way, so nothing else surfaces this: the sockets stay `600` and unreadable by
+/// a neighbour, but the directory-level opacity is gone and nobody is told.
+fn check_acl_support(r: &mut Report) {
+    let has_setfacl = ["/usr/bin/setfacl", "/bin/setfacl"]
+        .iter()
+        .any(|p| Path::new(p).exists());
+
+    if !has_setfacl {
+        r.add(Level::Warn, "state", "acl_missing", None);
+        return;
+    }
+
+    // Present is not the same as applied: a filesystem mounted without
+    // `acl` accepts the binary but not the attribute, and the panel would have
+    // silently fallen back on every start.
+    let widened: Vec<String> = crate::sys::state::list_accounts()
+        .into_iter()
+        .filter(|(dir, _)| {
+            std::fs::metadata(dir).is_ok_and(|m| m.mode() & 0o001 != 0)
+        })
+        .map(|(_, user)| user)
+        .collect();
+
+    if widened.is_empty() {
+        r.add(Level::Pass, "state", "acl_ok", None);
+    } else {
+        r.add(
+            Level::Warn,
+            "state",
+            "acl_fallback_used",
+            Some(widened.join(", ")),
+        );
+    }
 }
 
 /// Checks that the proxy handlers the panel generates are actually in place.
@@ -259,7 +243,7 @@ fn check_state_dir(r: &mut Report) {
 /// unreachable because no vhost routes to it. That failure is invisible from
 /// the app's own state, which is why it is checked here.
 fn check_proxy_config(r: &mut Report) {
-    let Some(conf_dir) = super::ols::conf_dir() else {
+    let Some(conf_dir) = crate::webserver::ols::conf_dir() else {
         // Nothing to check against — `check_templates` already reports on the
         // DirectAdmin side.
         return;
@@ -357,7 +341,7 @@ fn check_runtimes(r: &mut Report) {
     // A runtime that exists but was refused is invisible in the panel, and the
     // admin has no other way to tell that from a path the detector never looks
     // at. Report each one with the reason.
-    for (path, reason) in super::admin::rejected_node_runtimes() {
+    for (path, reason) in crate::runtime::detect::rejected_node_runtimes() {
         let key = match reason {
             "unsafe_ownership" => "node_unsafe_owner",
             _ => "node_untrusted_path",
@@ -367,7 +351,7 @@ fn check_runtimes(r: &mut Report) {
 }
 
 /// Runs every check and returns the report plus a summary.
-pub fn run_diagnostic() -> Result<Value, (String, String)> {
+pub(crate) fn run_diagnostic() -> Result<Value, (String, String)> {
     let mut r = Report::new();
     check_binary(&mut r);
     check_ownership_and_modes(&mut r);
@@ -386,29 +370,4 @@ pub fn run_diagnostic() -> Result<Value, (String, String)> {
             "fail": r.count(Level::Fail),
         },
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn service_files_are_not_executable() {
-        assert_eq!(expected_mode(Path::new("/x/scripts/selynt-panel.service")), 0o644);
-    }
-
-    #[test]
-    fn cgi_endpoints_and_pages_are_executable() {
-        assert_eq!(expected_mode(Path::new("/x/user/api/apps.raw")), 0o755);
-        assert_eq!(expected_mode(Path::new("/x/user/index.html")), 0o755);
-        assert_eq!(expected_mode(Path::new("/x/scripts/install.sh")), 0o755);
-        assert_eq!(expected_mode(Path::new("/x/hooks/anything")), 0o755);
-    }
-
-    #[test]
-    fn everything_else_is_read_only() {
-        assert_eq!(expected_mode(Path::new("/x/images/menu_user.json")), 0o644);
-        assert_eq!(expected_mode(Path::new("/x/lib/common.php")), 0o644);
-        assert_eq!(expected_mode(Path::new("/x/LICENSE")), 0o644);
-    }
 }

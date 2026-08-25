@@ -5,10 +5,11 @@ use std::str::FromStr;
 
 use serde_json::{Value, json};
 
-use crate::output::{success, system_error, user_error};
-use crate::state::{AppMeta, atomic_write, list_app_names, load_app_meta, set_perm, validate_name};
+use crate::sys::output::{success, system_error, user_error};
+use crate::sys::state::{AppMeta, list_app_names, load_app_meta, validate_name};
+use crate::sys::fs::{atomic_write, set_perm};
 
-use super::runtime::Runtime;
+use crate::runtime::kind::Runtime;
 use super::{get_status, signal_sync, stop_internal, validate_safe_component, with_debug};
 
 const LOG_TAIL_CHUNK: u64 = 8192;
@@ -36,7 +37,7 @@ pub fn cmd_list(state_dir: &Path, dbg: Option<&Value>) -> ! {
         let meta = match load_app_meta(state_dir, name) {
             Ok(m) => m,
             Err(e) => {
-                crate::output::debug(format!("skipping '{name}': {e}"));
+                crate::sys::output::debug(format!("skipping '{name}': {e}"));
                 continue;
             }
         };
@@ -91,17 +92,28 @@ pub fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Option<&Va
     success(with_debug(json!({}), dbg))
 }
 
-pub fn cmd_restart(state_dir: &Path, name: &str, web_user: &str, dbg: Option<&Value>) -> ! {
-    let Ok(meta) = load_app_meta(state_dir, name) else {
+/// Restarts an app.
+///
+/// The stop and the respawn both happen in the root prelude — see there for
+/// why. What is left here is the same readiness path `start` takes, so a
+/// restart is reported exactly like a start: only once the app is answering.
+///
+/// `spawned_pid` is `None` when the prelude found nothing to launch (no
+/// systemd, or the app's metadata could not be read); `cmd_start` then falls
+/// back to spawning it directly.
+pub fn cmd_restart(
+    state_dir: &Path,
+    name: &str,
+    username: &str,
+    web_user: &str,
+    spawned_pid: Option<u32>,
+    dbg: Option<&Value>,
+) -> ! {
+    if load_app_meta(state_dir, name).is_err() {
         user_error("app_not_found", &format!("app '{name}' not found"));
-    };
-
-    let (status, _, _) = get_status(state_dir, name);
-    if status == "RUNNING" {
-        stop_internal(state_dir, name, &meta, 10);
     }
 
-    super::cmd_start(state_dir, name, web_user, None, dbg)
+    super::cmd_start(state_dir, name, username, web_user, spawned_pid, dbg)
 }
 
 pub fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
@@ -158,13 +170,13 @@ pub fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
     // whether this host can isolate at all, the second whether the account
     // asked for it. Reporting only the preference would let the panel claim
     // isolation on a host that cannot provide it.
-    let supported = super::sandbox::available();
+    let supported = crate::limits::sandbox::available();
 
     success(with_debug(
         json!({
-            "isolated": crate::state::account_is_isolated(state_dir),
+            "isolated": crate::sys::state::account_is_isolated(state_dir),
             "supported": supported,
-            "reason": (!supported).then(super::sandbox::unavailable_reason),
+            "reason": (!supported).then(crate::limits::sandbox::unavailable_reason),
             "running": running_app_names(state_dir),
         }),
         dbg,
@@ -185,20 +197,20 @@ pub fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
 /// had no effect. Recreating each systemd scope is privileged work, which is
 /// why this cannot happen after the drop.
 ///
-/// Returns the apps that were restarted.
+/// Returns the apps that came back up, and those that did not.
 pub fn switch_isolation(
     state_dir: &Path,
     username: &str,
     isolated: bool,
-) -> Result<Vec<String>, (String, String)> {
+) -> Result<IsolationSwitch, (String, String)> {
     // Refuse rather than accept a setting this host cannot honour. Storing it
     // anyway would leave the panel reporting isolation that is not in effect,
     // which is worse than not offering it: the account would believe its apps
     // are separated while they still share everything.
-    if isolated && !super::sandbox::available() {
+    if isolated && !crate::limits::sandbox::available() {
         return Err((
             "sandbox_unavailable".into(),
-            super::sandbox::unavailable_reason().to_string(),
+            crate::limits::sandbox::unavailable_reason().to_string(),
         ));
     }
 
@@ -222,19 +234,33 @@ pub fn switch_isolation(
         })
         .collect();
 
-    let mut restarted = Vec::new();
+    let mut switch = IsolationSwitch::default();
     for name in running {
         let Ok(meta) = load_app_meta(state_dir, &name) else {
             continue;
         };
-        super::netguard::stop_app_tree(state_dir, &name, &meta);
+        crate::limits::netguard::stop_app_tree(state_dir, &name, &meta);
 
+        // Applying the new mode means stopping the app first, so a failed
+        // restart leaves it down. Reporting only the successes would have the
+        // panel announce the switch worked while the app it just took down
+        // never came back — the account would find it stopped with no clue why.
         if super::start_app_detached(username, &name) {
-            restarted.push(name);
+            switch.restarted.push(name);
+        } else {
+            switch.failed.push(name);
         }
     }
 
-    Ok(restarted)
+    Ok(switch)
+}
+
+/// Outcome of an isolation switch: the apps that came back up, and those that
+/// stayed down after being stopped to apply it.
+#[derive(Default)]
+pub struct IsolationSwitch {
+    pub restarted: Vec<String>,
+    pub failed: Vec<String>,
 }
 
 /// Names of the account's apps that are currently running.
@@ -250,11 +276,12 @@ pub fn running_app_names(state_dir: &Path) -> Vec<String> {
 /// The switch itself — writing the flag and restarting the apps — happens in
 /// the root prelude: applying it means recreating each app's systemd scope,
 /// which needs privileges this side of the drop no longer has.
-pub fn cmd_set_isolated(isolated: bool, restarted: Vec<String>, dbg: Option<&Value>) -> ! {
+pub fn cmd_set_isolated(isolated: bool, switch: IsolationSwitch, dbg: Option<&Value>) -> ! {
     success(with_debug(
         json!({
             "isolated": isolated,
-            "restarted": restarted,
+            "restarted": switch.restarted,
+            "failed": switch.failed,
         }),
         dbg,
     ))
@@ -317,7 +344,7 @@ pub fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, 
     // This runs as root, so the rewritten file would end up owned by root and
     // become unreadable to the user once privileges are dropped — the command
     // would then fail with `app_not_found` on its own file.
-    let _ = crate::state::chown_path(&app_file, uid, gid);
+    let _ = crate::sys::fs::chown_path(&app_file, uid, gid);
 }
 
 pub fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, dbg: Option<&Value>) -> ! {
@@ -362,7 +389,7 @@ pub fn cmd_remove(
     // Defensive — `stop_internal` already removed the socket, but on failure the
     // app still has to disappear from disk. Read while `.meta` is still around,
     // since that is what records where the socket really is.
-    let active_socket = crate::state::active_socket_path(state_dir, &meta);
+    let active_socket = crate::sys::state::active_socket_path(state_dir, &meta);
 
     let run_dir = state_dir.join(".run");
     for ext in &["pid", "meta", "enabled"] {
@@ -375,7 +402,7 @@ pub fn cmd_remove(
     // The configured path too: it differs from the active one when the account
     // switched isolation mode while the app was down, and neither may be left
     // behind.
-    let _ = std::fs::remove_file(crate::state::socket_path_for(state_dir, &meta));
+    let _ = std::fs::remove_file(crate::sys::state::socket_path_for(state_dir, &meta));
     let _ = std::fs::remove_dir(state_dir.join(".sockets").join(name));
     let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
 
@@ -563,7 +590,7 @@ pub(super) fn rotate_log_if_needed(path: &Path) {
     if size <= LOG_ROTATE_MAX_BYTES {
         return;
     }
-    crate::output::debug(format!("rotating log {} ({size} bytes)", path.display()));
+    crate::sys::output::debug(format!("rotating log {} ({size} bytes)", path.display()));
 
     let lines = read_tail(path, LOG_ROTATE_KEEP_LINES);
     let content = lines.join("\n") + "\n";

@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use serde_json::{Value, json};
 
-use crate::output::debug;
-use crate::proc::{has_external_listen, is_process_alive};
-use crate::state::{AppMeta, list_app_names, load_app_meta};
+use crate::sys::output::debug;
+use crate::sys::proc::{has_external_listen, is_process_alive};
+use crate::sys::state::{AppMeta, list_app_names, load_app_meta};
 
-use super::to_nix_pid;
+use crate::cmd::to_nix_pid;
 
 /// Grace period for the app to shut down before it is killed.
 const STOP_TIMEOUT_SECS: u64 = 5;
@@ -29,14 +29,14 @@ const STOP_TIMEOUT_SECS: u64 = 5;
 ///
 /// Returns the names that were stopped. Runs as root, so it can act on the
 /// account's processes.
-pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
+pub(crate) fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
     let mut stopped = Vec::new();
 
     for name in list_app_names(state_dir) {
         let Ok(meta) = load_app_meta(state_dir, &name) else {
             continue;
         };
-        let pids = super::stats::scope_pids(username, &name);
+        let pids = super::usage::scope_pids(username, &name);
         if pids.is_empty() {
             continue;
         }
@@ -59,7 +59,7 @@ pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
 /// Used when the panel itself has to bring an app down from the prelude —
 /// `stop_internal` cannot, because it resolves the process through
 /// `get_status`, which requires the caller's uid to match the app's.
-pub fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
+pub(crate) fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
     let pids: Vec<u32> = std::fs::read_to_string(
         state_dir.join(".run").join(format!("{name}.pid")),
     )
@@ -67,7 +67,7 @@ pub fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
     .and_then(|p| p.trim().parse::<u32>().ok())
     .map(|pid| {
         let mut all = vec![pid];
-        all.extend(crate::proc::descendants_of(pid));
+        all.extend(crate::sys::proc::descendants_of(pid));
         all
     })
     .unwrap_or_default();
@@ -115,7 +115,7 @@ fn stop_offending_app(
 
     let run = state_dir.join(".run");
 
-    let _ = std::fs::remove_file(crate::state::active_socket_path(state_dir, meta));
+    let _ = std::fs::remove_file(crate::sys::state::active_socket_path(state_dir, meta));
 
     // Clear the run state so the panel reports STOPPED instead of a stale PID.
     for suffix in ["pid", "meta"] {
@@ -127,15 +127,15 @@ fn stop_offending_app(
         let _ = std::fs::remove_file(run.join(format!("{name}.enabled")));
     }
 
-    super::signal_sync();
+    crate::cmd::signal_sync();
 }
 
 /// Sweeps every account on the server.
 ///
 /// Runs as root from the timer. Returns each stopped app as `user/name`.
-pub fn sweep_all_accounts() -> Vec<String> {
+pub(crate) fn sweep_all_accounts() -> Vec<String> {
     let mut stopped = Vec::new();
-    for (state_dir, username) in crate::state::list_accounts() {
+    for (state_dir, username) in crate::sys::state::list_accounts() {
         for name in sweep_account(&state_dir, &username) {
             stopped.push(format!("{username}/{name}"));
         }
@@ -147,9 +147,9 @@ pub fn sweep_all_accounts() -> Vec<String> {
 ///
 /// The sweep itself must run as root, so it happens in the prelude and only its
 /// outcome reaches here.
-pub fn report(stopped: Option<Vec<String>>, dbg: Option<&Value>) -> ! {
+pub(crate) fn report(stopped: Option<Vec<String>>, dbg: Option<&Value>) -> ! {
     let stopped = stopped.unwrap_or_default();
-    crate::output::success(super::with_debug(
+    crate::sys::output::success(crate::cmd::with_debug(
         json!({
             "stopped": stopped.len(),
             "apps": stopped,

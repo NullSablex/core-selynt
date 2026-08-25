@@ -6,7 +6,7 @@ pub const NODE_MIN_MINOR: u32 = 6;
 
 /// Parses `v20.15.1` into `(20, 15, 1)`. Returns `None` when the input does not
 /// start with `v` or any of the version components fails to parse.
-pub fn parse_node_semver(ver: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn parse_node_semver(ver: &str) -> Option<(u32, u32, u32)> {
     let s = ver.strip_prefix('v')?;
     let mut parts = s.splitn(3, '.');
     let major = parts.next()?.parse().ok()?;
@@ -15,7 +15,7 @@ pub fn parse_node_semver(ver: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-pub fn node_version_ok(ver: &str) -> bool {
+pub(crate) fn node_version_ok(ver: &str) -> bool {
     parse_node_semver(ver).is_some_and(|(major, minor, _)| {
         major > NODE_MIN_MAJOR || (major == NODE_MIN_MAJOR && minor >= NODE_MIN_MINOR)
     })
@@ -23,7 +23,7 @@ pub fn node_version_ok(ver: &str) -> bool {
 
 /// Runs `{path} --version` and returns the raw output (e.g. `v20.15.1`),
 /// without checking against the minimum supported version.
-pub fn get_node_version_raw(path: &Path) -> Option<String> {
+pub(crate) fn get_node_version_raw(path: &Path) -> Option<String> {
     let output = std::process::Command::new(path)
         .arg("--version")
         .output()
@@ -37,7 +37,7 @@ pub fn get_node_version_raw(path: &Path) -> Option<String> {
 
 /// Same as `get_node_version_raw` but filters out runtimes that don't meet the
 /// minimum supported version.
-pub fn get_node_version(path: &Path) -> Option<String> {
+pub(crate) fn get_node_version(path: &Path) -> Option<String> {
     let ver = get_node_version_raw(path)?;
     node_version_ok(&ver).then_some(ver)
 }
@@ -48,7 +48,7 @@ pub fn get_node_version(path: &Path) -> Option<String> {
 /// either side of it — `/opt/alt/alt-nodejs*/root/usr/bin/node` scans `/opt/alt`
 /// for entries starting with `alt-nodejs`. Matching only whole components would
 /// miss CloudLinux's alt-nodejs layout entirely.
-pub fn glob_paths(pattern: &str) -> Vec<PathBuf> {
+pub(crate) fn glob_paths(pattern: &str) -> Vec<PathBuf> {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() != 2 {
         return Vec::new();

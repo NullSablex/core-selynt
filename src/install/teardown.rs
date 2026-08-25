@@ -9,10 +9,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::output::success;
-use crate::state::{DA_TEMPLATES, STATE_BASE};
+use crate::sys::output::success;
+use crate::sys::state::{DA_TEMPLATES, STATE_BASE};
 
-use super::with_debug;
+use crate::cmd::with_debug;
 
 /// Stops every app of every account, and everything each one spawned.
 ///
@@ -21,12 +21,12 @@ use super::with_debug;
 /// dying would leave the real process behind holding its socket.
 fn stop_all_apps() -> usize {
     let mut stopped = 0;
-    for (state_dir, _username) in crate::state::list_accounts() {
-        for name in crate::state::list_app_names(&state_dir) {
-            let Ok(meta) = crate::state::load_app_meta(&state_dir, &name) else {
+    for (state_dir, _username) in crate::sys::state::list_accounts() {
+        for name in crate::sys::state::list_app_names(&state_dir) {
+            let Ok(meta) = crate::sys::state::load_app_meta(&state_dir, &name) else {
                 continue;
             };
-            super::netguard::stop_app_tree(&state_dir, &name, &meta);
+            crate::limits::netguard::stop_app_tree(&state_dir, &name, &meta);
             stopped += 1;
         }
     }
@@ -44,11 +44,11 @@ fn strip_block(path: &Path) -> Option<&'static str> {
     let mut kept = String::new();
     let mut inside = false;
     for line in content.lines() {
-        if line.trim_end() == super::ols::BEGIN_MARK {
+        if line.trim_end() == crate::webserver::ols::BEGIN_MARK {
             inside = true;
             continue;
         }
-        if line.trim_end() == super::ols::END_MARK {
+        if line.trim_end() == crate::webserver::ols::END_MARK {
             inside = false;
             continue;
         }
@@ -58,17 +58,36 @@ fn strip_block(path: &Path) -> Option<&'static str> {
         }
     }
 
+    // Report what actually happened, not what was attempted: a template the
+    // uninstall could not rewrite still carries the panel's block, and saying
+    // "stripped" would leave the admin believing the server was left clean.
     if kept.trim().is_empty() {
-        let _ = std::fs::remove_file(path);
-        Some("removed")
+        match std::fs::remove_file(path) {
+            Ok(()) => Some("removed"),
+            Err(e) => {
+                crate::sys::output::debug(format!("teardown: {} not removed: {e}", path.display()));
+                Some("remove_failed")
+            }
+        }
     } else {
-        let _ = crate::state::atomic_write(path, kept.as_bytes());
-        Some("stripped")
+        match crate::sys::fs::atomic_write(path, kept.as_bytes()) {
+            Ok(()) => Some("stripped"),
+            Err(e) => {
+                crate::sys::output::debug(format!("teardown: {} not stripped: {e:#}", path.display()));
+                Some("strip_failed")
+            }
+        }
     }
 }
 
 /// Drops the panel's include line and its generated handler file.
-fn clean_web_server_config() {
+///
+/// Returns whatever could not be cleaned. The include line points at a file
+/// this also deletes, so a failure here leaves the web server referring to
+/// something that is gone — the admin has to hear about it rather than read a
+/// teardown that claims success.
+fn clean_web_server_config() -> Vec<String> {
+    let mut failures = Vec::new();
     for dir in ["/etc/openlitespeed", "/usr/local/lsws/conf"] {
         let dir = Path::new(dir);
 
@@ -84,13 +103,23 @@ fn clean_web_server_config() {
                 .filter(|l| !l.contains("selynt_panel extProcessors include"))
                 .map(|l| format!("{l}\n"))
                 .collect();
-            let _ = crate::state::atomic_write(&main, cleaned.as_bytes());
+            if let Err(e) = crate::sys::fs::atomic_write(&main, cleaned.as_bytes()) {
+                failures.push(format!("{}: {e:#}", main.display()));
+            }
         }
 
         let conf = dir.join("selynt_extprocessors.conf");
-        let _ = std::fs::remove_file(&conf);
-        let _ = std::fs::remove_file(conf.with_extension("conf.tmp"));
+        // A file that was never there is not a failure — only one that resisted
+        // deletion is.
+        for p in [conf.clone(), conf.with_extension("conf.tmp")] {
+            if let Err(e) = std::fs::remove_file(&p)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                failures.push(format!("{}: {e}", p.display()));
+            }
+        }
     }
+    failures
 }
 
 /// Removes everything the panel installed, leaving the server as it was.
@@ -114,12 +143,12 @@ fn run() -> Value {
         })
         .collect();
 
-    clean_web_server_config();
+    let config_failures = clean_web_server_config();
 
     // The vhosts still carry the proxy blocks until DirectAdmin regenerates
     // them from the templates it no longer has.
-    let vhosts_rebuilt = super::ols::rebuild_vhosts();
-    let reloaded = super::proxysync::reload_web_server();
+    let vhosts_rebuilt = crate::webserver::ols::rebuild_vhosts();
+    let reloaded = crate::webserver::proxysync::reload_web_server();
 
     json!({
         "units_removed": units.len(),
@@ -127,10 +156,11 @@ fn run() -> Value {
         "templates": templates,
         "vhosts_rebuilt": vhosts_rebuilt,
         "web_server_reloaded": reloaded,
+        "config_cleanup_failures": config_failures,
     })
 }
 
 /// CLI entry point.
-pub fn cmd_teardown(dbg: Option<&Value>) -> ! {
+pub(crate) fn cmd_teardown(dbg: Option<&Value>) -> ! {
     success(with_debug(run(), dbg))
 }

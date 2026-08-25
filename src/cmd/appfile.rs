@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::state::{atomic_write, chown_path, set_perm};
+use crate::sys::fs::{atomic_write, chown_path, set_perm};
 
 /// Owner and mode for `.app` files: readable by the account, writable only by
 /// root. The panel reads this after the privilege drop, so it cannot be 0600.

@@ -13,9 +13,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::output::success;
-use crate::proc::is_process_alive;
-use crate::state::{PLUGIN_PATH, STATE_BASE, list_app_names};
+use crate::sys::output::success;
+use crate::sys::proc::is_process_alive;
+use crate::sys::state::{PLUGIN_PATH, STATE_BASE, list_app_names};
 
 use super::with_debug;
 
@@ -66,7 +66,7 @@ pub fn recover_all() -> Vec<String> {
     log(&format!("boot-recover: scanning {STATE_BASE}"));
     let mut started = Vec::new();
 
-    for (user_dir, username) in crate::state::list_accounts() {
+    for (user_dir, username) in crate::sys::state::list_accounts() {
         let run_dir = user_dir.join(".run");
 
         for name in list_app_names(&user_dir) {

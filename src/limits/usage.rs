@@ -4,10 +4,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::output::{success, user_error};
-use crate::state::{DA_USERS_BASE, load_app_meta};
+use crate::sys::output::{success, user_error};
+use crate::sys::state::{DA_USERS_BASE, load_app_meta};
 
-use super::{get_status, with_debug};
+use crate::cmd::{get_status, with_debug};
 
 /// cgroup v2 path for an app's scope.
 ///
@@ -17,7 +17,7 @@ use super::{get_status, with_debug};
 /// stopped and their stats would come back empty until a restart.
 fn scope_cgroup(username: &str, name: &str) -> String {
     let unit = format!("selynt-{username}-{name}.scope");
-    let in_slice = format!("{}/{unit}", super::memory::slice_cgroup(username));
+    let in_slice = format!("{}/{unit}", super::policy::slice_cgroup(username));
     if Path::new(&in_slice).is_dir() {
         return in_slice;
     }
@@ -29,7 +29,7 @@ fn scope_cgroup(username: &str, name: &str) -> String {
 /// The cgroup is what makes a whole-app check possible: a child process is
 /// still in it, however it was started, so callers do not have to walk the
 /// process tree themselves. Empty when the app is not running.
-pub fn scope_pids(username: &str, name: &str) -> Vec<u32> {
+pub(crate) fn scope_pids(username: &str, name: &str) -> Vec<u32> {
     let procs = Path::new(&scope_cgroup(username, name)).join("cgroup.procs");
     let Ok(content) = std::fs::read_to_string(procs) else {
         return Vec::new();
@@ -78,7 +78,7 @@ pub struct ScopeUsage {
 
 /// Reads an app's cgroup usage, or `None` when the scope is not present (the
 /// app is stopped, or systemd is unavailable and it runs outside a scope).
-pub fn read_scope_usage(username: &str, name: &str) -> Option<ScopeUsage> {
+pub(crate) fn read_scope_usage(username: &str, name: &str) -> Option<ScopeUsage> {
     let dir = std::path::PathBuf::from(scope_cgroup(username, name));
     if !dir.is_dir() {
         return None;
@@ -101,7 +101,7 @@ pub struct DaLimits {
 /// Reads the account's limits from DirectAdmin. **Must run as root**:
 /// `data/users/` is `diradmin`-owned and `0700`, so after the privilege drop
 /// this silently returns nothing and every app looks unlimited.
-pub fn read_da_limits(username: &str) -> DaLimits {
+pub(crate) fn read_da_limits(username: &str) -> DaLimits {
     DaLimits {
         memory_max: da_limit(username, "MemoryMax")
             .as_deref()
@@ -154,7 +154,7 @@ fn parse_cpu_quota(raw: &str) -> Option<u32> {
 /// CPU is a cumulative counter, so a single reading cannot express a rate. The
 /// raw value is returned and the caller samples twice — that keeps the CGI from
 /// blocking for a second on every request.
-pub fn cmd_stats(
+pub(crate) fn cmd_stats(
     state_dir: &Path,
     name: &str,
     username: &str,
@@ -226,9 +226,9 @@ pub fn cmd_stats(
                 "max": app.map(|l| l.max),
                 "pinned": meta.memory_max,
                 "account": limits.memory_max,
-                "slice_cap": limits.memory_max.map(super::memory::slice_cap),
+                "slice_cap": limits.memory_max.map(super::policy::slice_cap),
                 "slice_used": limits.memory_max.and_then(|_| {
-                    read_anon_bytes(Path::new(&super::memory::slice_cgroup(username)))
+                    read_anon_bytes(Path::new(&super::policy::slice_cgroup(username)))
                 }),
             },
             "cpu": { "usage_usec": cpu_usec, "quota_percent": cpu_quota },
@@ -246,32 +246,32 @@ fn scope_is_live(username: &str, name: &str) -> bool {
 
 /// Resolves the memory cap for one app, reading the account allowance from
 /// DirectAdmin and every sibling app's own setting. Must run as root.
-pub fn app_limits_for(
+pub(crate) fn app_limits_for(
     state_dir: &Path,
     username: &str,
     name: &str,
-    meta: &crate::state::AppMeta,
-) -> Option<super::memory::AppLimits> {
+    meta: &crate::sys::state::AppMeta,
+) -> Option<super::policy::AppLimits> {
     app_limits_for_with(state_dir, username, name, meta, "", "")
 }
 
 /// [`app_limits_for`], counting `pending` as running even though its scope does
 /// not exist yet.
-pub fn app_limits_for_with(
+pub(crate) fn app_limits_for_with(
     state_dir: &Path,
     username: &str,
     name: &str,
-    meta: &crate::state::AppMeta,
+    meta: &crate::sys::state::AppMeta,
     pending: &str,
     leaving: &str,
-) -> Option<super::memory::AppLimits> {
+) -> Option<super::policy::AppLimits> {
     let account = read_da_limits(username).memory_max;
 
     // No account allowance: there is no pool to divide, but a pin the user set
     // is still theirs to enforce — otherwise asking for 200 MB would leave the
     // app running unbounded.
     let Some(account) = account else {
-        return meta.memory_max.map(|cap| super::memory::AppLimits {
+        return meta.memory_max.map(|cap| super::policy::AppLimits {
             min: 0,
             high: cap.saturating_sub(16 * 1024 * 1024).max(1),
             max: cap,
@@ -282,7 +282,7 @@ pub fn app_limits_for_with(
     // anything from it — a pin just caps that one app — so all that matters
     // here is how many are actually competing.
     let mut running = 1; // this app
-    for other in crate::state::list_app_names(state_dir) {
+    for other in crate::sys::state::list_app_names(state_dir) {
         if other == name {
             continue;
         }
@@ -294,8 +294,8 @@ pub fn app_limits_for_with(
         }
     }
 
-    Some(super::memory::app_limits(
-        super::memory::slice_cap(account),
+    Some(super::policy::app_limits(
+        super::policy::slice_cap(account),
         running,
         meta.memory_max,
     ))
@@ -313,28 +313,28 @@ pub fn app_limits_for_with(
 /// `systemctl set-property --runtime` applies to a live scope, so the new
 /// ceiling takes effect at once. `--runtime` keeps it out of /etc: the scope is
 /// transient and the source of truth is the `.app` file.
-pub fn reapply_app_limits(state_dir: &Path, username: &str) {
+pub(crate) fn reapply_app_limits(state_dir: &Path, username: &str) {
     reapply_app_limits_with(state_dir, username, "", "");
 }
 
 /// Same as [`reapply_app_limits`], but treats `leaving` as already gone — used
 /// when stopping an app, whose scope outlives the prelude that decides limits.
-pub fn reapply_app_limits_excluding(state_dir: &Path, username: &str, leaving: &str) {
+pub(crate) fn reapply_app_limits_excluding(state_dir: &Path, username: &str, leaving: &str) {
     reapply_app_limits_with(state_dir, username, "", leaving);
 }
 
 /// Same as [`reapply_app_limits`], but also counts `pending` — an app that is about
 /// to start and therefore has no scope yet.
-pub fn reapply_app_limits_including(state_dir: &Path, username: &str, pending: &str) {
+pub(crate) fn reapply_app_limits_including(state_dir: &Path, username: &str, pending: &str) {
     reapply_app_limits_with(state_dir, username, pending, "");
 }
 
 fn reapply_app_limits_with(state_dir: &Path, username: &str, pending: &str, leaving: &str) {
-    if !super::start::systemd_available() {
+    if !super::policy::can_run_scopes() {
         return;
     }
-    for name in crate::state::list_app_names(state_dir) {
-        let Ok(meta) = crate::state::load_app_meta(state_dir, &name) else {
+    for name in crate::sys::state::list_app_names(state_dir) {
+        let Ok(meta) = crate::sys::state::load_app_meta(state_dir, &name) else {
             continue;
         };
         // Only touch scopes that exist; a stopped app gets its limits at start.
@@ -374,11 +374,11 @@ fn reapply_app_limits_with(state_dir: &Path, username: &str, pending: &str, leav
 /// deliberately allowed to add up to more than this, and the slice is what
 /// stops them. Called before and after a spawn — before, the slice may not
 /// exist yet and the call simply fails; after, it exists and takes effect.
-pub fn ensure_slice_cap(username: &str, cap: Option<u64>) {
-    if !super::start::systemd_available() {
+pub(crate) fn ensure_slice_cap(username: &str, cap: Option<u64>) {
+    if !super::policy::can_run_scopes() {
         return;
     }
-    let unit = super::memory::slice_unit_name(username);
+    let unit = super::policy::slice_unit_name(username);
     let value = match cap {
         Some(bytes) => format!("MemoryMax={bytes}"),
         None => "MemoryMax=infinity".to_string(),

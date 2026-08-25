@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use crate::state::PLUGIN_PATH;
+use crate::sys::state::PLUGIN_PATH;
 
 /// Where systemd looks for units installed by packages and administrators.
 const SYSTEMD_DIR: &str = "/etc/systemd/system";
@@ -147,7 +147,13 @@ const UNITS: [Unit; 5] = [
 ];
 
 /// Whether this host can run the units at all.
-pub fn systemd_available() -> bool {
+/// True when units can be written and managed on this host.
+///
+/// Deliberately not the same question as [`crate::limits::policy::can_run_scopes`]:
+/// this one is about the unit directory, that one about the `systemd-run`
+/// binary. Both were once called `systemd_available`, which invited importing
+/// whichever came to hand and getting a check that passes for the wrong reason.
+pub(crate) fn units_supported() -> bool {
     Path::new(SYSTEMD_DIR).is_dir() && Path::new("/run/systemd/system").is_dir()
 }
 
@@ -163,8 +169,8 @@ fn systemctl(args: &[&str]) -> bool {
 /// Writes every unit and enables the ones that should run.
 ///
 /// Returns the units it installed.
-pub fn install() -> Vec<&'static str> {
-    if !systemd_available() {
+pub(crate) fn install() -> Vec<&'static str> {
+    if !units_supported() {
         return Vec::new();
     }
 
@@ -175,8 +181,8 @@ pub fn install() -> Vec<&'static str> {
         let path = Path::new(SYSTEMD_DIR).join(unit.name);
         let content = unit.content.replace("{BIN}", &bin);
 
-        if crate::state::atomic_write(&path, content.as_bytes())
-            .and_then(|()| crate::state::set_perm(&path, 0o644))
+        if crate::sys::fs::atomic_write(&path, content.as_bytes())
+            .and_then(|()| crate::sys::fs::set_perm(&path, 0o644))
             .is_err()
         {
             continue;
@@ -203,8 +209,8 @@ pub fn install() -> Vec<&'static str> {
 }
 
 /// Disables and removes every unit the panel installed.
-pub fn remove() -> Vec<&'static str> {
-    if !systemd_available() {
+pub(crate) fn remove() -> Vec<&'static str> {
+    if !units_supported() {
         return Vec::new();
     }
 
