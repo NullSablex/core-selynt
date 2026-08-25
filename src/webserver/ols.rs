@@ -63,6 +63,34 @@ pub fn main_conf() -> Option<PathBuf> {
     conf_dir().map(|d| d.join("httpd_config.conf"))
 }
 
+/// Marker lines around the include, so `teardown` can find and remove it.
+const INCLUDE_BEGIN: &str = "# BEGIN SELYNT_PANEL extProcessors include";
+const INCLUDE_END: &str = "# END SELYNT_PANEL extProcessors include";
+
+/// Makes sure `httpd_config.conf` pulls in the generated handler file.
+///
+/// Without it the handlers exist on disk and the web server never reads them,
+/// so every proxied app answers 503 while looking perfectly healthy: the
+/// process runs, the socket accepts, and the marker is in place.
+///
+/// Re-checked on every `setup` because `DirectAdmin` rewrites this file — a
+/// rebuild drops the line, and nothing else would put it back.
+fn ensure_include(conf_dir: &Path) -> std::io::Result<()> {
+    let main = conf_dir.join("httpd_config.conf");
+    let existing = std::fs::read_to_string(&main)?;
+    if existing.contains("selynt_extprocessors.conf") {
+        return Ok(());
+    }
+
+    let include = conf_dir.join("selynt_extprocessors.conf");
+    let block = format!(
+        "\n{INCLUDE_BEGIN}\ninclude {}\n{INCLUDE_END}\n",
+        include.display()
+    );
+    crate::sys::fs::atomic_write(&main, format!("{existing}{block}").as_bytes())
+        .map_err(std::io::Error::other)
+}
+
 /// Replaces the panel's block in a template, leaving anything else in place.
 fn upsert_block(path: &Path, block: &str) -> std::io::Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -205,6 +233,16 @@ pub fn run() -> Result<Outcome, (String, String)> {
     }
 
     let vhosts_rebuilt = templates_written && rebuild_vhosts();
+
+    // After the rebuild, never before: `rewrite_confs` regenerates
+    // `httpd_config.conf` from DirectAdmin's own templates and drops anything
+    // else in it. Writing the include first meant writing it and then watching
+    // it be erased in the same run.
+    if let Some(dir) = conf_dir()
+        && let Err(e) = ensure_include(dir)
+    {
+        return Err(("include_write_failed".to_string(), format!("{e:#}")));
+    }
 
     Ok(Outcome {
         web_user,
