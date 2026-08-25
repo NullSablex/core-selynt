@@ -202,7 +202,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // leave the app on its old, larger ceiling.
         Commands::SetMemoryMax { name, megabytes } => {
             let da = limits::usage::read_da_limits(&username);
-            app::commands::apply_memory_max(&state_dir, &name, megabytes, uid, gid);
+            app::commands::apply_memory_max(&state_dir, &name, megabytes, gid);
             limits::usage::ensure_slice_cap(&username, da.memory_max);
             limits::usage::reapply_app_limits(&state_dir, &username);
             let (sd, d) = (state_dir, dbg);

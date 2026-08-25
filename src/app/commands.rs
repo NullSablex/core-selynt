@@ -5,7 +5,7 @@ use std::str::FromStr;
 use serde_json::{Value, json};
 
 use crate::sys::fs::{atomic_write, set_perm};
-use crate::sys::output::{success, user_error};
+use crate::sys::output::{debug, success, user_error};
 use crate::sys::state::{AppMeta, list_app_names, load_app_meta};
 
 use super::logs::{read_tail, strip_ansi};
@@ -304,7 +304,7 @@ pub fn cmd_set_node_version(
 /// on the next start — the running scope keeps its current limit.
 /// Writes the cap into the `.app` file. Separate from `cmd_set_memory_max` so
 /// the root prelude can persist it *before* re-resolving every sibling's cap.
-pub fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, gid: u32) {
+pub fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, gid: u32) {
     if megabytes != 0 && megabytes < 16 {
         return; // validated (and reported) by cmd_set_memory_max
     }
@@ -325,11 +325,14 @@ pub fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, 
     if bytes > 0 {
         let _ = writeln!(out, "memory_max={bytes}");
     }
-    let _ = atomic_write(&app_file, out.as_bytes()).and_then(|()| set_perm(&app_file, 0o600));
-    // This runs as root, so the rewritten file would end up owned by root and
-    // become unreadable to the user once privileges are dropped — the command
-    // would then fail with `app_not_found` on its own file.
-    let _ = crate::sys::fs::chown_path(&app_file, uid, gid);
+    // Through `write_as_root`, like every other `.app` write: the file has to
+    // stay root-owned or `load_app_meta` refuses it, and the app vanishes from
+    // the panel while its process keeps running. Writing it as the account —
+    // which this once did, to keep it readable after the drop — is exactly what
+    // the ownership check exists to reject.
+    if let Err(e) = super::appfile::write_as_root(&app_file, &out, gid) {
+        debug(format!("apply_memory_max '{name}': {e}"));
+    }
 }
 
 pub fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, dbg: Option<&Value>) -> ! {
