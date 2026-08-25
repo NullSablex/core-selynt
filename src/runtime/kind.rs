@@ -11,20 +11,21 @@ use std::str::FromStr;
 pub enum Runtime {
     /// Node.js: the panel picks the interpreter and runs the entry script.
     Node,
-    /// Rust: the customer compiles a binary and the panel executes it directly.
-    Rust,
+    /// An executable the customer supplies; the panel runs it directly. Any
+    /// language that produces one qualifies — the panel never inspects it.
+    Binary,
 }
 
 impl Runtime {
     /// Every runtime, in the order the UI should offer them.
-    pub const ALL: [Self; 2] = [Self::Node, Self::Rust];
+    pub const ALL: [Self; 2] = [Self::Node, Self::Binary];
 
     /// The stable identifier persisted in app metadata (`type=` in `.app`
     /// files) and sent over the JSON API. Changing one breaks existing apps.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Node => "node",
-            Self::Rust => "rust",
+            Self::Binary => "binary",
         }
     }
 
@@ -35,7 +36,7 @@ impl Runtime {
     pub const fn is_interpreted(self) -> bool {
         match self {
             Self::Node => true,
-            Self::Rust => false,
+            Self::Binary => false,
         }
     }
 
@@ -99,9 +100,9 @@ mod tests {
         assert!(Runtime::Node.scaffolds_entry());
         assert!(!Runtime::Node.requires_executable_entry());
 
-        assert!(!Runtime::Rust.is_interpreted());
-        assert!(!Runtime::Rust.scaffolds_entry());
-        assert!(Runtime::Rust.requires_executable_entry());
+        assert!(!Runtime::Binary.is_interpreted());
+        assert!(!Runtime::Binary.scaffolds_entry());
+        assert!(Runtime::Binary.requires_executable_entry());
     }
 
     #[test]
@@ -112,6 +113,6 @@ mod tests {
             "node /home/bob/app/index.js"
         );
         let e = Path::new("/home/bob/app/server");
-        assert_eq!(Runtime::Rust.command_display(e), "/home/bob/app/server");
+        assert_eq!(Runtime::Binary.command_display(e), "/home/bob/app/server");
     }
 }

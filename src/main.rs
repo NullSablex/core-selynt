@@ -215,14 +215,14 @@ enum AdminCommands {
 #[derive(Clone, ValueEnum)]
 enum AppType {
     Node,
-    Rust,
+    Binary,
 }
 
 impl AppType {
     const fn runtime(&self) -> Runtime {
         match self {
             Self::Node => Runtime::Node,
-            Self::Rust => Runtime::Rust,
+            Self::Binary => Runtime::Binary,
         }
     }
 
