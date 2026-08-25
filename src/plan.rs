@@ -16,11 +16,11 @@ use crate::{AdminCommands, Commands, admin, app, install, limits, sys};
 ///
 /// Boxed because each arm captures different values. The command exits from
 /// inside, so this never returns normally.
-pub(crate) type Deferred = Box<dyn FnOnce()>;
+pub type Deferred = Box<dyn FnOnce()>;
 
 /// What both halves of a command may need. Gathered before the drop, since some
 /// of it is unreadable afterwards.
-pub(crate) struct Ctx<'a> {
+pub struct Ctx<'a> {
     pub username: &'a str,
     pub state_dir: &'a Path,
     pub web_user: &'a str,
@@ -33,7 +33,12 @@ pub(crate) struct Ctx<'a> {
 /// Decides what a command does, as root, and returns what it does afterwards.
 ///
 /// The body of each arm is still privileged; the closure it returns is not.
-pub(crate) fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
+// One arm per command, deliberately in one function: the exhaustive match is
+// what stops a new command from being added with only half of it decided, and
+// splitting by group would give that guarantee up. Each arm is around a dozen
+// lines; the length is the number of commands, not complexity.
+#[allow(clippy::too_many_lines)]
+pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
     let Ctx {
         username,
         state_dir,
@@ -211,7 +216,7 @@ pub(crate) fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
                 Err((code, msg)) => sys::output::user_error(&code, &msg),
                 Ok(switch) => {
                     let d = dbg;
-                    Box::new(move || app::commands::cmd_set_isolated(isolated, switch, d.as_ref()))
+                    Box::new(move || app::commands::cmd_set_isolated(isolated, &switch, d.as_ref()))
                 }
             }
         }
@@ -249,7 +254,7 @@ pub(crate) fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
             AdminCommands::Diagnose => {
                 let out = install::diagnose::run_diagnostic();
                 let d = dbg;
-                Box::new(move || crate::emit_prelude_result(out, d.as_ref()))
+                Box::new(move || crate::emit_prelude_result(Ok(out), d.as_ref()))
             }
             AdminCommands::DetectNodes => {
                 let d = dbg;

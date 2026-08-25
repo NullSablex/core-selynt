@@ -34,7 +34,7 @@ struct Report {
 }
 
 impl Report {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { items: Vec::new() }
     }
 
@@ -44,7 +44,7 @@ impl Report {
     /// The binary reports *state*, never prose: the panel is translated and the
     /// admin reading it should not have to know about setuid bits, template
     /// numbers or which system account serves CGI.
-    fn add(&mut self, level: Level, group: &str, key: &str, arg: Option<String>) {
+    fn add(&mut self, level: Level, group: &str, key: &str, arg: Option<&str>) {
         self.items.push(json!({
             "level": level.as_str(),
             "group": group,
@@ -114,7 +114,7 @@ fn check_ownership_and_modes(r: &mut Report) {
             Level::Fail,
             "install",
             "ownership_bad",
-            Some(foreign.to_string()),
+            Some(&foreign.to_string()),
         );
     }
 
@@ -125,7 +125,7 @@ fn check_ownership_and_modes(r: &mut Report) {
             Level::Warn,
             "install",
             "permissions_bad",
-            Some(wrong_mode.len().to_string()),
+            Some(&wrong_mode.len().to_string()),
         );
     }
 }
@@ -138,8 +138,7 @@ fn check_identity_files(r: &mut Report) {
         .iter()
         .filter(|f| {
             std::fs::read_to_string(Path::new(PLUGIN_PATH).join(f))
-                .map(|v| v.trim().is_empty())
-                .unwrap_or(true)
+                .map_or(true, |v| v.trim().is_empty())
         })
         .count();
     if missing == 0 {
@@ -190,11 +189,11 @@ fn check_state_dir(r: &mut Report) {
         Level::Pass,
         "state",
         "registered",
-        Some(format!("{apps}|{accounts}")),
+        Some(&format!("{apps}|{accounts}")),
     );
 
     for path in unowned {
-        r.add(Level::Warn, "state", "app_not_owned", Some(path));
+        r.add(Level::Warn, "state", "app_not_owned", Some(&path));
     }
 
     check_acl_support(r);
@@ -231,7 +230,7 @@ fn check_acl_support(r: &mut Report) {
             Level::Warn,
             "state",
             "acl_fallback_used",
-            Some(widened.join(", ")),
+            Some(&widened.join(", ")),
         );
     }
 }
@@ -257,7 +256,7 @@ fn check_proxy_config(r: &mut Report) {
                 .filter(|l| l.trim_start().starts_with("extProcessor"))
                 .count();
             if count > 0 {
-                r.add(Level::Pass, "proxy", "extproc_ok", Some(count.to_string()));
+                r.add(Level::Pass, "proxy", "extproc_ok", Some(&count.to_string()));
             } else {
                 r.add(Level::Warn, "proxy", "extproc_empty", None);
             }
@@ -295,14 +294,14 @@ fn check_proxy_config(r: &mut Report) {
             Level::Pass,
             "proxy",
             "vhosts_ok",
-            Some(format!("{with_proxy}|{checked}")),
+            Some(&format!("{with_proxy}|{checked}")),
         );
     } else {
         r.add(
             Level::Warn,
             "proxy",
             "vhosts_unpatched",
-            Some(checked.to_string()),
+            Some(&checked.to_string()),
         );
     }
 }
@@ -338,7 +337,7 @@ fn check_runtimes(r: &mut Report) {
     match std::fs::read_to_string(&f) {
         Ok(v) if !v.trim().is_empty() => {
             let n = v.lines().filter(|l| !l.trim().is_empty()).count();
-            r.add(Level::Pass, "runtime", "node_ok", Some(n.to_string()));
+            r.add(Level::Pass, "runtime", "node_ok", Some(&n.to_string()));
         }
         _ => r.add(Level::Warn, "runtime", "node_none", None),
     }
@@ -351,12 +350,12 @@ fn check_runtimes(r: &mut Report) {
             "unsafe_ownership" => "node_unsafe_owner",
             _ => "node_untrusted_path",
         };
-        r.add(Level::Warn, "runtime", key, Some(path));
+        r.add(Level::Warn, "runtime", key, Some(&path));
     }
 }
 
 /// Runs every check and returns the report plus a summary.
-pub(crate) fn run_diagnostic() -> Result<Value, (String, String)> {
+pub fn run_diagnostic() -> Value {
     let mut r = Report::new();
     check_binary(&mut r);
     check_ownership_and_modes(&mut r);
@@ -367,12 +366,12 @@ pub(crate) fn run_diagnostic() -> Result<Value, (String, String)> {
     check_boot_service(&mut r);
     check_runtimes(&mut r);
 
-    Ok(json!({
+    json!({
         "checks": r.items,
         "summary": {
             "pass": r.count(Level::Pass),
             "warn": r.count(Level::Warn),
             "fail": r.count(Level::Fail),
         },
-    }))
+    })
 }

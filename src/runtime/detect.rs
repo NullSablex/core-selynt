@@ -56,7 +56,7 @@ fn node_candidates() -> Vec<PathBuf> {
 
 /// Detects Node.js runtimes installed on the system. Returns
 /// `Vec<(path, version)>` — e.g. `("/usr/bin/node", "v22.22.0")`.
-pub(crate) fn detect_node_versions() -> Vec<(String, String)> {
+pub fn detect_node_versions() -> Vec<(String, String)> {
     let candidates = node_candidates();
 
     let mut versions = Vec::new();
@@ -95,7 +95,7 @@ fn is_trusted_runtime_path(canonical: &Path) -> bool {
 /// with why. Detection skips these silently — it must, since executing them is
 /// the risk — so the diagnostic reports them instead: "installed it and the
 /// panel does not list it" is otherwise indistinguishable from a broken glob.
-pub(crate) fn rejected_node_runtimes() -> Vec<(String, &'static str)> {
+pub fn rejected_node_runtimes() -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for path in node_candidates() {
@@ -111,10 +111,10 @@ pub(crate) fn rejected_node_runtimes() -> Vec<(String, &'static str)> {
         if is_safe_to_execute(&canonical) {
             continue;
         }
-        let reason = if !is_trusted_runtime_path(&canonical) {
-            "untrusted_path"
-        } else {
+        let reason = if is_trusted_runtime_path(&canonical) {
             "unsafe_ownership"
+        } else {
+            "untrusted_path"
         };
         out.push((path.to_string_lossy().to_string(), reason));
     }

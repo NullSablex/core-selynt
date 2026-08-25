@@ -3,7 +3,7 @@
 //! An account's apps run as the same user, so by default they can read each
 //! other's files and signal each other's processes. Isolated, each runs where
 //! the neighbours do not exist — still as the account, since a system user per
-//! app would fill `/etc/passwd` with entries DirectAdmin knows nothing about.
+//! app would fill `/etc/passwd` with entries `DirectAdmin` knows nothing about.
 //!
 //! The sandbox goes *inside* the systemd scope: the app must stay in its own
 //! cgroup for the memory limits and the netguard sweep to keep working.
@@ -20,7 +20,7 @@ const SYSTEM_PATHS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/et
 /// Bubblewrap is packaged on the distributions the panel targets but is not
 /// universally installed, and unprivileged namespaces can be disabled outright.
 /// Callers fall back to running the app unisolated.
-pub(crate) fn available() -> bool {
+pub fn available() -> bool {
     bwrap_path().is_some() && user_namespaces_enabled()
 }
 
@@ -28,7 +28,7 @@ pub(crate) fn available() -> bool {
 ///
 /// Returns an i18n key rather than prose: the panel translates it, and the CLI
 /// prints it as-is.
-pub(crate) fn unavailable_reason() -> &'static str {
+pub fn unavailable_reason() -> &'static str {
     if bwrap_path().is_none() {
         "errors.sandbox_no_bwrap"
     } else if !user_namespaces_enabled() {
@@ -58,7 +58,7 @@ fn user_namespaces_enabled() -> bool {
 /// the rest of the account's home is left out of the mount namespace. A tmpfs
 /// would hide the neighbours too, but the socket created on it would exist only
 /// inside the namespace and the proxy could never reach it.
-pub(crate) fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
+pub fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
     let Some(bwrap) = bwrap_path() else {
         return cmd;
     };
@@ -131,7 +131,7 @@ mod tests {
         assert!(args.windows(3).any(|w| w == ["--bind", "/app", "/app"]));
     }
 
-    /// Environment is what carries SELYNT_SOCKET to the app.
+    /// Environment is what carries `SELYNT_SOCKET` to the app.
     #[test]
     fn carries_environment_over() {
         if super::bwrap_path().is_none() {

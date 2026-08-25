@@ -149,7 +149,7 @@ const UNITS: [Unit; 5] = [
 /// this one is about the unit directory, that one about the `systemd-run`
 /// binary. Both were once called `systemd_available`, which invited importing
 /// whichever came to hand and getting a check that passes for the wrong reason.
-pub(crate) fn units_supported() -> bool {
+pub fn units_supported() -> bool {
     Path::new(SYSTEMD_DIR).is_dir() && Path::new("/run/systemd/system").is_dir()
 }
 
@@ -165,7 +165,7 @@ fn systemctl(args: &[&str]) -> bool {
 /// Writes every unit and enables the ones that should run.
 ///
 /// Returns the units it installed.
-pub(crate) fn install() -> Vec<&'static str> {
+pub fn install() -> Vec<&'static str> {
     if !units_supported() {
         return Vec::new();
     }
@@ -205,7 +205,7 @@ pub(crate) fn install() -> Vec<&'static str> {
 }
 
 /// Disables and removes every unit the panel installed.
-pub(crate) fn remove() -> Vec<&'static str> {
+pub fn remove() -> Vec<&'static str> {
     if !units_supported() {
         return Vec::new();
     }
@@ -262,14 +262,19 @@ mod tests {
         for unit in &UNITS {
             if unit.enable {
                 assert!(
-                    unit.name.ends_with(".timer") || unit.name == "selynt-panel.service",
+                    std::path::Path::new(unit.name)
+                        .extension()
+                        .is_some_and(|e| e == "timer")
+                        || unit.name == "selynt-panel.service",
                     "{} should not be enabled directly",
                     unit.name
                 );
             }
             if unit.start_now {
                 assert!(
-                    unit.name.ends_with(".timer"),
+                    std::path::Path::new(unit.name)
+                        .extension()
+                        .is_some_and(|e| e == "timer"),
                     "{} started eagerly",
                     unit.name
                 );

@@ -35,7 +35,7 @@ pub(super) fn chown_recursive(path: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+pub fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
     let s = path
         .to_str()
         .with_context(|| format!("non-UTF8 path {}", path.display()))?;
@@ -52,7 +52,7 @@ pub(crate) fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
 }
 
 /// Parses `KEY=VALUE` per line. Lines without `=` are silently skipped.
-pub(crate) fn parse_kv(content: &str) -> HashMap<String, String> {
+pub fn parse_kv(content: &str) -> HashMap<String, String> {
     content
         .lines()
         .filter_map(|line| {
@@ -64,7 +64,7 @@ pub(crate) fn parse_kv(content: &str) -> HashMap<String, String> {
 
 /// Atomic write: writes a sibling `.tmp` and renames over the target. Both
 /// steps must be on the same filesystem (`state_dir` always is).
-pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let tmp_name = format!(
         ".{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp")
@@ -76,7 +76,7 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_perm(path: &Path, mode: u32) -> Result<()> {
+pub fn set_perm(path: &Path, mode: u32) -> Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .with_context(|| format!("chmod {mode:o} {}", path.display()))
 }

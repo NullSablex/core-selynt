@@ -104,8 +104,11 @@ fn clean_web_server_config() -> Vec<String> {
                 .lines()
                 .filter(|l| !l.contains("selynt_extprocessors"))
                 .filter(|l| !l.contains("selynt_panel extProcessors include"))
-                .map(|l| format!("{l}\n"))
-                .collect();
+                .fold(String::new(), |mut acc, l| {
+                    acc.push_str(l);
+                    acc.push('\n');
+                    acc
+                });
             if let Err(e) = crate::sys::fs::atomic_write(&main, cleaned.as_bytes()) {
                 failures.push(format!("{}: {e:#}", main.display()));
             }
@@ -164,6 +167,6 @@ fn run() -> Value {
 }
 
 /// CLI entry point.
-pub(crate) fn cmd_teardown(dbg: Option<&Value>) -> ! {
+pub fn cmd_teardown(dbg: Option<&Value>) -> ! {
     success(with_debug(run(), dbg))
 }

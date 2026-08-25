@@ -1,4 +1,4 @@
-//! Regenerates the OpenLiteSpeed proxy handlers for every live app.
+//! Regenerates the `OpenLiteSpeed` proxy handlers for every live app.
 //!
 //! Rewrites the whole set from the apps that are up, then reloads — but only
 //! when the panel left a marker saying the set changed, since rewriting on
@@ -23,7 +23,7 @@ use crate::app::with_debug;
 
 const LOCK_FILE: &str = "/var/lib/selynt_panel/.sync.lock";
 
-/// The ports the DirectAdmin template generates handlers for.
+/// The ports the `DirectAdmin` template generates handlers for.
 ///
 /// The handler name has to match `selynt_proxy-|SDOMAIN|-|VH_PORT|` exactly, or
 /// the vhost refers to something that does not exist.
@@ -152,8 +152,8 @@ fn write_config(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Asks OpenLiteSpeed to pick up the new configuration.
-pub(crate) fn reload_web_server() -> bool {
+/// Asks `OpenLiteSpeed` to pick up the new configuration.
+pub fn reload_web_server() -> bool {
     let restart = |program: &str, args: &[&str]| {
         std::process::Command::new(program)
             .args(args)
@@ -171,7 +171,7 @@ pub(crate) fn reload_web_server() -> bool {
 /// Returns how many apps were written, or `None` when another run holds the
 /// lock — cron fires every minute, and two rewrites at once would race over the
 /// same file.
-pub(crate) fn sync() -> Option<usize> {
+pub fn sync() -> Option<usize> {
     let _lock = Lock::acquire()?;
 
     // Independent of the routing, and done first so a web server that refuses
@@ -220,7 +220,7 @@ pub(crate) fn sync() -> Option<usize> {
     Some(apps.len())
 }
 
-/// Re-reads every account's allowance from DirectAdmin and applies it.
+/// Re-reads every account's allowance from `DirectAdmin` and applies it.
 ///
 /// An admin can change it without the panel being involved, so a raised quota
 /// reaches an account that never opens the panel. One file read and one
@@ -263,15 +263,14 @@ impl Lock {
 }
 
 /// CLI entry point.
-pub(crate) fn cmd_sync_proxy(dbg: Option<&Value>) -> ! {
-    match sync() {
-        Some(count) => success(with_debug(json!({ "apps": count }), dbg)),
+pub fn cmd_sync_proxy(dbg: Option<&Value>) -> ! {
+    sync().map_or_else(
         // Another run holds the lock and is about to write the same thing, or
         // the config could not be written at all. Neither is worth failing the
-        // command that triggered it: the app is already up either way, and the
-        // next change re-runs this.
-        None => success(with_debug(json!({ "apps": 0, "skipped": true }), dbg)),
-    }
+        // command that triggered it: the app is already up either way.
+        || success(with_debug(json!({ "apps": 0, "skipped": true }), dbg)),
+        |count| success(with_debug(json!({ "apps": count }), dbg)),
+    )
 }
 
 #[cfg(test)]

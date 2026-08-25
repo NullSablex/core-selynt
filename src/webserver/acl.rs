@@ -7,7 +7,7 @@ use crate::sys::output::debug;
 /// Grants the web user the minimum access required to reach an app's Unix
 /// socket and proxy marker. Tries `setfacl` first; if it is unavailable or
 /// fails, falls back to `chmod` with permissive-but-still-restricted modes.
-pub(crate) fn apply_acl(state_dir: &Path, socket_path: &Path, marker_path: &Path, web_user: &str) {
+pub fn apply_acl(state_dir: &Path, socket_path: &Path, marker_path: &Path, web_user: &str) {
     if web_user.is_empty() {
         debug("no web_user configured — skipping ACL");
         return;

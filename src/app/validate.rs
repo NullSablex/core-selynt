@@ -18,7 +18,7 @@ use super::commands::AddArgs;
 use super::validate_safe_component;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum CwdError {
+pub enum CwdError {
     NotAbsolute,
     Unresolvable,
     Outside { resolved: String, home: String },
@@ -26,11 +26,11 @@ pub(crate) enum CwdError {
 
 /// Where an app's code lives when the caller does not say: `<home>/apps/<name>`.
 ///
-/// The home comes from DirectAdmin, which is what makes this pass
+/// The home comes from `DirectAdmin`, which is what makes this pass
 /// [`check_cwd_within_home`]. Using the *name* and not the host is deliberate:
 /// the name is the app's identity, while a host can be repointed without the
 /// code moving.
-pub(crate) fn default_cwd(home: &str, name: &str) -> String {
+pub fn default_cwd(home: &str, name: &str) -> String {
     format!("{home}/apps/{name}")
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn default_cwd(home: &str, name: &str) -> String {
 /// The root prelude needs this shape: it writes the `.app` file, and a refusal
 /// there has to stop the write and travel back as JSON — not exit, and above
 /// all not leave the file behind.
-pub(crate) fn cwd_refusal(cwd: &str, home: &Path) -> Option<(String, String)> {
+pub fn cwd_refusal(cwd: &str, home: &Path) -> Option<(String, String)> {
     match check_cwd_within_home(cwd, home) {
         Ok(()) => None,
         Err(CwdError::NotAbsolute) => {
@@ -335,7 +335,7 @@ mod tests {
     }
 
     /// `/home/user2` must not pass just because it shares a textual prefix with
-    /// `/home/user` — starts_with on components, not on the raw string.
+    /// `/home/user` — `starts_with` on components, not on the raw string.
     #[test]
     fn rejects_sibling_home_with_shared_prefix() {
         let base = std::env::temp_dir().join(format!("selynt-test-prefix-{}", std::process::id()));

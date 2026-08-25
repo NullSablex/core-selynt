@@ -6,6 +6,7 @@
 //! otherwise forge one and have the panel launch it — not an escalation, but a
 //! way to sabotage a neighbour.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::sys::fs::{atomic_write, chown_path, set_perm};
@@ -15,7 +16,7 @@ use crate::sys::fs::{atomic_write, chown_path, set_perm};
 const APP_FILE_MODE: u32 = 0o640;
 
 /// Path of an app's metadata file.
-pub(crate) fn app_file_path(state_dir: &Path, name: &str) -> PathBuf {
+pub fn app_file_path(state_dir: &Path, name: &str) -> PathBuf {
     state_dir.join(".run").join(format!("{name}.app"))
 }
 
@@ -23,7 +24,7 @@ pub(crate) fn app_file_path(state_dir: &Path, name: &str) -> PathBuf {
 ///
 /// `gid` is the account's group, so the panel can still read the file after
 /// dropping privileges.
-pub(crate) fn write_as_root(path: &Path, content: &str, gid: u32) -> Result<(), String> {
+pub fn write_as_root(path: &Path, content: &str, gid: u32) -> Result<(), String> {
     atomic_write(path, content.as_bytes()).map_err(|e| format!("{e:#}"))?;
     // Root owns it; the account's group only reads.
     chown_path(path, 0, gid).map_err(|e| format!("{e:#}"))?;
@@ -34,7 +35,7 @@ pub(crate) fn write_as_root(path: &Path, content: &str, gid: u32) -> Result<(), 
 /// Rewrites one `key=value` in an existing `.app`, appending it when absent.
 ///
 /// Returns the new contents, or `None` when the file cannot be read.
-pub(crate) fn rewrite_key(path: &Path, key: &str, value: &str) -> Option<String> {
+pub fn rewrite_key(path: &Path, key: &str, value: &str) -> Option<String> {
     let current = std::fs::read_to_string(path).ok()?;
     let mut found = false;
     let mut out = String::with_capacity(current.len() + value.len());
@@ -42,7 +43,7 @@ pub(crate) fn rewrite_key(path: &Path, key: &str, value: &str) -> Option<String>
         if let Some((k, _)) = line.split_once('=')
             && k.trim() == key
         {
-            out.push_str(&format!("{key}={value}\n"));
+            let _ = writeln!(out, "{key}={value}");
             found = true;
         } else {
             out.push_str(line);
@@ -50,7 +51,7 @@ pub(crate) fn rewrite_key(path: &Path, key: &str, value: &str) -> Option<String>
         }
     }
     if !found {
-        out.push_str(&format!("{key}={value}\n"));
+        let _ = writeln!(out, "{key}={value}");
     }
     Some(out)
 }
@@ -59,7 +60,7 @@ pub(crate) fn rewrite_key(path: &Path, key: &str, value: &str) -> Option<String>
 ///
 /// Fails if the app already exists — the exclusive create is what makes two
 /// concurrent `add` calls for the same name safe.
-pub(crate) fn create_for_add(
+pub fn create_for_add(
     state_dir: &Path,
     args: &super::commands::AddArgs<'_>,
     username: &str,
@@ -114,7 +115,7 @@ pub(crate) fn create_for_add(
 }
 
 /// Updates one key of an existing `.app`, as root.
-pub(crate) fn update_key(
+pub fn update_key(
     state_dir: &Path,
     name: &str,
     key: &str,
@@ -134,7 +135,7 @@ pub(crate) fn update_key(
 /// one operation where losing the metadata early is harmless, since `cmd_remove`
 /// has already loaded it. Anything that reads it afterwards is looking at an app
 /// that is being deleted.
-pub(crate) fn remove(state_dir: &Path, name: &str) {
+pub fn remove(state_dir: &Path, name: &str) {
     let _ = std::fs::remove_file(app_file_path(state_dir, name));
 }
 

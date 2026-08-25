@@ -9,7 +9,7 @@ use super::fs::{chown_path, chown_recursive, parse_kv};
 
 pub const PLUGIN_PATH: &str = "/usr/local/directadmin/plugins/selynt_panel";
 pub const DA_USERS_BASE: &str = "/usr/local/directadmin/data/users";
-/// Where DirectAdmin keeps the vhost templates it generates configs from.
+/// Where `DirectAdmin` keeps the vhost templates it generates configs from.
 pub const DA_TEMPLATES: &str = "/usr/local/directadmin/data/templates";
 /// Root of the panel's per-account state.
 pub const STATE_BASE: &str = "/var/lib/selynt_panel";
@@ -46,7 +46,7 @@ pub struct AppMeta {
 /// chowns the whole tree to the target user. The recursive chown is required
 /// because a previous run with different ownership could otherwise leave
 /// stale entries the user can't touch.
-pub(crate) fn init_state_dir(state_dir: &Path, uid: u32, gid: u32) -> Result<()> {
+pub fn init_state_dir(state_dir: &Path, uid: u32, gid: u32) -> Result<()> {
     for dir in std::iter::once(state_dir.to_path_buf())
         .chain(STATE_SUBDIRS.iter().map(|s| state_dir.join(s)))
     {
@@ -85,7 +85,7 @@ pub(crate) fn init_state_dir(state_dir: &Path, uid: u32, gid: u32) -> Result<()>
 
 /// Creates `{cwd}/logs/` owned by the target user. Called as root before the
 /// privilege drop so the app can write logs after dropping.
-pub(crate) fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
+pub fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
     let logs_dir = cwd.join("logs");
     if !logs_dir.is_dir() {
         std::fs::create_dir_all(&logs_dir)
@@ -125,7 +125,7 @@ pub(crate) fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
 /// One place to decide what counts as an account. The state base also holds
 /// dotfiles, and a directory can outlive the account it belonged to — filtering
 /// that in each caller is how the checks stopped agreeing with each other.
-pub(crate) fn list_accounts() -> Vec<(PathBuf, String)> {
+pub fn list_accounts() -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir(STATE_BASE) else {
         return Vec::new();
     };
@@ -154,15 +154,17 @@ pub(crate) fn list_accounts() -> Vec<(PathBuf, String)> {
 /// a non-isolated sibling — same uid, ordinary view of the host — could still
 /// read an isolated app's files and signal its processes. Protecting one app
 /// therefore only works if every app of the account is isolated.
-pub(crate) fn account_is_isolated(state_dir: &Path) -> bool {
-    match std::fs::read_to_string(state_dir.join("isolated")) {
-        Ok(v) => v.trim() == "1",
+pub fn account_is_isolated(state_dir: &Path) -> bool {
+    std::fs::read_to_string(state_dir.join("isolated")).map_or_else(
         // No choice recorded for this account: fall back to the server-wide
-        // default the admin set. Accounts that predate the setting behave as
-        // the admin decided, without needing to be touched one by one.
-        Err(_) => std::fs::read_to_string(format!("{PLUGIN_PATH}/etc/default_isolated"))
-            .is_ok_and(|v| v.trim() == "1"),
-    }
+        // default the admin set, so accounts that predate the setting behave as
+        // decided without being touched one by one.
+        |_| {
+            std::fs::read_to_string(format!("{PLUGIN_PATH}/etc/default_isolated"))
+                .is_ok_and(|v| v.trim() == "1")
+        },
+        |v| v.trim() == "1",
+    )
 }
 
 /// The socket path a running app actually has, recorded when it started.
@@ -171,14 +173,13 @@ pub(crate) fn account_is_isolated(state_dir: &Path) -> bool {
 /// moves, but a running app keeps the one it launched with. Stops and cleanups
 /// must act on this, or they strand the real file and delete one that was never
 /// there. Falls back to the configured path when nothing was recorded.
-pub(crate) fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
+pub fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
     let meta_file = state_dir.join(".run").join(format!("{}.meta", meta.name));
 
     std::fs::read_to_string(meta_file)
         .ok()
         .and_then(|c| parse_kv(&c).get("socket").cloned())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| socket_path_for(state_dir, meta))
+        .map_or_else(|| socket_path_for(state_dir, meta), PathBuf::from)
 }
 
 /// Where an app's Unix socket lives.
@@ -187,7 +188,7 @@ pub(crate) fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
 /// that one into the mount namespace, so a sibling's socket is absent rather
 /// than merely unreadable. It stays a real file on the host either way — the
 /// proxy has to reach it.
-pub(crate) fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
+pub fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
     let sockets = state_dir.join(".sockets");
     if account_is_isolated(state_dir) {
         sockets.join(&meta.name).join(&meta.host)
@@ -196,7 +197,7 @@ pub(crate) fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
     }
 }
 
-pub(crate) fn load_app_meta(state_dir: &Path, name: &str) -> Result<AppMeta> {
+pub fn load_app_meta(state_dir: &Path, name: &str) -> Result<AppMeta> {
     let app_file = state_dir.join(".run").join(format!("{name}.app"));
 
     // `.run` has to stay writable for the account's own `.pid`/`.meta`, so an
@@ -231,7 +232,7 @@ pub(crate) fn load_app_meta(state_dir: &Path, name: &str) -> Result<AppMeta> {
     })
 }
 
-pub(crate) fn list_app_names(state_dir: &Path) -> Vec<String> {
+pub fn list_app_names(state_dir: &Path) -> Vec<String> {
     let run_dir = state_dir.join(".run");
     let mut names = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&run_dir) {
@@ -252,7 +253,7 @@ pub(crate) fn list_app_names(state_dir: &Path) -> Vec<String> {
 }
 
 /// Validates an app name against `^[A-Za-z0-9._-]{1,64}$`.
-pub(crate) fn validate_name(name: &str) -> bool {
+pub fn validate_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
@@ -266,7 +267,7 @@ pub(crate) fn validate_name(name: &str) -> bool {
 /// `SELYNT_WEB_USER` is honoured only for root, as a debugging escape hatch:
 /// this decides which account ACLs are granted to, so an unprivileged caller
 /// setting it could open up another user's app directories.
-pub(crate) fn get_web_user() -> String {
+pub fn get_web_user() -> String {
     if unsafe { libc::getuid() } == 0
         && let Ok(u) = std::env::var("SELYNT_WEB_USER")
     {

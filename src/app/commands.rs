@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -28,7 +29,7 @@ pub struct AddArgs<'a> {
     pub env_vars: &'a [String],
 }
 
-pub(crate) fn cmd_list(state_dir: &Path, dbg: Option<&Value>) -> ! {
+pub fn cmd_list(state_dir: &Path, dbg: Option<&Value>) -> ! {
     let names = list_app_names(state_dir);
     let mut apps = Vec::new();
 
@@ -63,7 +64,7 @@ pub(crate) fn cmd_list(state_dir: &Path, dbg: Option<&Value>) -> ! {
     success(with_debug(json!({ "apps": apps }), dbg))
 }
 
-pub(crate) fn cmd_status(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
+pub fn cmd_status(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     if load_app_meta(state_dir, name).is_err() {
         user_error("app_not_found", &format!("app '{name}' not found"));
     }
@@ -72,7 +73,7 @@ pub(crate) fn cmd_status(state_dir: &Path, name: &str, dbg: Option<&Value>) -> !
     success(with_debug(json!({ "status": status, "pid": pid_val }), dbg))
 }
 
-pub(crate) fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Option<&Value>) -> ! {
+pub fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Option<&Value>) -> ! {
     let Ok(meta) = load_app_meta(state_dir, name) else {
         user_error("app_not_found", &format!("app '{name}' not found"));
     };
@@ -97,7 +98,7 @@ pub(crate) fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Opt
 /// left here is the readiness path `start` takes, so a restart is reported the
 /// same way: only once the app is answering. `spawned_pid` is `None` when there
 /// was nothing to launch, and `cmd_start` then spawns it directly.
-pub(crate) fn cmd_restart(
+pub fn cmd_restart(
     state_dir: &Path,
     name: &str,
     username: &str,
@@ -112,14 +113,13 @@ pub(crate) fn cmd_restart(
     super::start::cmd_start(state_dir, name, username, web_user, spawned_pid, dbg)
 }
 
-pub(crate) fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
+pub fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
     // The prelude resolved and checked this already, and wrote it into the
     // `.app` file. Reading it back is what keeps the two from disagreeing:
     // duplicating the default here is how the old one drifted into pointing
     // outside the home, where the check would then refuse it.
     let resolved_cwd = crate::sys::state::load_app_meta(state_dir, args.name)
-        .map(|m| m.cwd)
-        .unwrap_or_else(|_| args.cwd.unwrap_or_default().to_string());
+        .map_or_else(|_| args.cwd.unwrap_or_default().to_string(), |m| m.cwd);
     let cwd = resolved_cwd.as_str();
 
     validate_add_args(args, cwd);
@@ -156,7 +156,7 @@ pub(crate) fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>)
 }
 
 /// Reports whether this account isolates its apps, and which are running.
-pub(crate) fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
+pub fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
     // `supported` is separate from `isolated` on purpose: the first says
     // whether this host can isolate at all, the second whether the account
     // asked for it. Reporting only the preference would let the panel claim
@@ -183,7 +183,7 @@ pub(crate) fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
 /// Runs as root — recreating each systemd scope is privileged, and an app keeps
 /// the mode it launched with until restarted. Returns the apps that came back
 /// up, and those that did not.
-pub(crate) fn switch_isolation(
+pub fn switch_isolation(
     state_dir: &Path,
     username: &str,
     isolated: bool,
@@ -249,7 +249,7 @@ pub struct IsolationSwitch {
 }
 
 /// Names of the account's apps that are currently running.
-pub(crate) fn running_app_names(state_dir: &Path) -> Vec<String> {
+pub fn running_app_names(state_dir: &Path) -> Vec<String> {
     list_app_names(state_dir)
         .into_iter()
         .filter(|n| get_status(state_dir, n).0 == "RUNNING")
@@ -261,7 +261,7 @@ pub(crate) fn running_app_names(state_dir: &Path) -> Vec<String> {
 /// The switch itself — writing the flag and restarting the apps — happens in
 /// the root prelude: applying it means recreating each app's systemd scope,
 /// which needs privileges this side of the drop no longer has.
-pub(crate) fn cmd_set_isolated(isolated: bool, switch: IsolationSwitch, dbg: Option<&Value>) -> ! {
+pub fn cmd_set_isolated(isolated: bool, switch: &IsolationSwitch, dbg: Option<&Value>) -> ! {
     success(with_debug(
         json!({
             "isolated": isolated,
@@ -272,7 +272,7 @@ pub(crate) fn cmd_set_isolated(isolated: bool, switch: IsolationSwitch, dbg: Opt
     ))
 }
 
-pub(crate) fn cmd_set_node_version(
+pub fn cmd_set_node_version(
     state_dir: &Path,
     name: &str,
     node_version: &str,
@@ -304,7 +304,7 @@ pub(crate) fn cmd_set_node_version(
 /// on the next start — the running scope keeps its current limit.
 /// Writes the cap into the `.app` file. Separate from `cmd_set_memory_max` so
 /// the root prelude can persist it *before* re-resolving every sibling's cap.
-pub(crate) fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, gid: u32) {
+pub fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, gid: u32) {
     if megabytes != 0 && megabytes < 16 {
         return; // validated (and reported) by cmd_set_memory_max
     }
@@ -323,7 +323,7 @@ pub(crate) fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid
         out.push('\n');
     }
     if bytes > 0 {
-        out.push_str(&format!("memory_max={bytes}\n"));
+        let _ = writeln!(out, "memory_max={bytes}");
     }
     let _ = atomic_write(&app_file, out.as_bytes()).and_then(|()| set_perm(&app_file, 0o600));
     // This runs as root, so the rewritten file would end up owned by root and
@@ -332,12 +332,7 @@ pub(crate) fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid
     let _ = crate::sys::fs::chown_path(&app_file, uid, gid);
 }
 
-pub(crate) fn cmd_set_memory_max(
-    state_dir: &Path,
-    name: &str,
-    megabytes: u64,
-    dbg: Option<&Value>,
-) -> ! {
+pub fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, dbg: Option<&Value>) -> ! {
     if load_app_meta(state_dir, name).is_err() {
         user_error("app_not_found", &format!("app '{name}' not found"));
     }
@@ -387,7 +382,7 @@ fn remove_run_state(state_dir: &Path, name: &str, meta: &AppMeta) {
     let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
 }
 
-pub(crate) fn cmd_remove(
+pub fn cmd_remove(
     state_dir: &Path,
     name: &str,
     delete_dir: bool,
@@ -443,7 +438,7 @@ pub(crate) fn cmd_remove(
 
 /// Receives data pre-loaded as root (before the privilege drop). Each entry is
 /// `(domain, subdomain_prefixes)`.
-pub(crate) fn cmd_domains(data: Vec<(String, Vec<String>)>, dbg: Option<&Value>) -> ! {
+pub fn cmd_domains(data: Vec<(String, Vec<String>)>, dbg: Option<&Value>) -> ! {
     let domains_json: Vec<Value> = data
         .into_iter()
         .map(|(domain, subs)| {
@@ -458,7 +453,7 @@ pub(crate) fn cmd_domains(data: Vec<(String, Vec<String>)>, dbg: Option<&Value>)
     success(with_debug(json!({ "domains": domains_json }), dbg))
 }
 
-pub(crate) fn cmd_logs(
+pub fn cmd_logs(
     state_dir: &Path,
     name: &str,
     lines: usize,

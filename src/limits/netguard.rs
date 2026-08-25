@@ -26,7 +26,7 @@ const STOP_TIMEOUT_SECS: u64 = 5;
 ///
 /// Returns the names that were stopped. Runs as root, so it can act on the
 /// account's processes.
-pub(crate) fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
+pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
     let mut stopped = Vec::new();
 
     for name in list_app_names(state_dir) {
@@ -56,7 +56,7 @@ pub(crate) fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
 /// Used when the panel itself has to bring an app down from the prelude —
 /// `stop_internal` cannot, because it resolves the process through
 /// `get_status`, which requires the caller's uid to match the app's.
-pub(crate) fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
+pub fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
     let pids: Vec<u32> =
         std::fs::read_to_string(state_dir.join(".run").join(format!("{name}.pid")))
             .ok()
@@ -127,7 +127,7 @@ fn stop_offending_app(
 /// Sweeps every account on the server.
 ///
 /// Runs as root from the timer. Returns each stopped app as `user/name`.
-pub(crate) fn sweep_all_accounts() -> Vec<String> {
+pub fn sweep_all_accounts() -> Vec<String> {
     let mut stopped = Vec::new();
     for (state_dir, username) in crate::sys::state::list_accounts() {
         for name in sweep_account(&state_dir, &username) {
@@ -141,7 +141,7 @@ pub(crate) fn sweep_all_accounts() -> Vec<String> {
 ///
 /// The sweep itself must run as root, so it happens in the prelude and only its
 /// outcome reaches here.
-pub(crate) fn report(stopped: Option<Vec<String>>, dbg: Option<&Value>) -> ! {
+pub fn report(stopped: Option<Vec<String>>, dbg: Option<&Value>) -> ! {
     let stopped = stopped.unwrap_or_default();
     crate::sys::output::success(crate::app::with_debug(
         json!({

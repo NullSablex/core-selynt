@@ -1,12 +1,12 @@
 //! An application's life cycle: registering it, launching it, watching it, and
 //! taking it down.
 
-pub(crate) mod appfile;
-pub(crate) mod boot;
-pub(crate) mod commands;
-pub(crate) mod logs;
-pub(crate) mod start;
-pub(crate) mod validate;
+pub mod appfile;
+pub mod boot;
+pub mod commands;
+pub mod logs;
+pub mod start;
+pub mod validate;
 
 use std::path::Path;
 
@@ -31,7 +31,7 @@ pub const fn to_nix_pid(pid: u32) -> Pid {
 }
 
 /// Merges a `_debug` block into a JSON response when debug mode is on.
-pub(crate) fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
+pub fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
     if let Some(dbg) = debug {
         val["_debug"] = dbg.clone();
     }
@@ -44,7 +44,7 @@ pub(crate) fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
 /// running it as a child also keeps one app's failure from ending a sweep over
 /// many. The installed path is used rather than `/proc/self/exe` because this
 /// binary is setuid and that path is the one the installer owns.
-pub(crate) fn start_app_detached(username: &str, name: &str) -> bool {
+pub fn start_app_detached(username: &str, name: &str) -> bool {
     std::process::Command::new(format!(
         "{}/bin/core-selynt",
         crate::sys::state::PLUGIN_PATH
@@ -60,7 +60,7 @@ pub(crate) fn start_app_detached(username: &str, name: &str) -> bool {
 
 /// Determines `(status, pid, started_at)` for an app, validating the PID
 /// against `/proc/{pid}/status` (UID match) and `.meta` (anti-PID-reuse).
-pub(crate) fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, Option<u64>) {
+pub fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, Option<u64>) {
     let pid_file = state_dir.join(".run").join(format!("{name}.pid"));
     let meta_file = state_dir.join(".run").join(format!("{name}.meta"));
 
@@ -91,10 +91,7 @@ pub(crate) fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, 
 
 /// Lightweight status check used by the admin command. Skips UID matching
 /// because admin reads other users' state dirs as root before the drop.
-pub(crate) fn admin_get_status(
-    pid_file: &Path,
-    meta_file: &Path,
-) -> (String, Option<u32>, Option<u64>) {
+pub fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u32>, Option<u64>) {
     let Ok(pid_str) = std::fs::read_to_string(pid_file) else {
         return ("STOPPED".to_string(), None, None);
     };
@@ -113,7 +110,7 @@ pub(crate) fn admin_get_status(
 
 /// Touches the sync marker file so the cron sync job knows to re-render the
 /// proxy config on its next minute tick.
-pub(crate) fn signal_sync() {
+pub fn signal_sync() {
     // Records that the proxy config no longer matches the live apps.
     //
     // Rewriting it means writing OpenLiteSpeed's config and reloading — both
@@ -125,13 +122,13 @@ pub(crate) fn signal_sync() {
 
 /// Validates that a value cannot escape its containing directory: no `/`,
 /// no `..`, no null bytes, and not empty.
-pub(crate) fn validate_safe_component(s: &str) -> bool {
+pub fn validate_safe_component(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\0') && !s.contains("..")
 }
 
 /// Stops a process without exiting. Used by `remove` and `restart` to share
 /// the SIGTERM→poll→SIGKILL sequence with the user-facing `stop` command.
-pub(crate) fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs: u64) {
+pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs: u64) {
     let (status, pid_opt, _) = get_status(state_dir, name);
     if status == "STOPPED" {
         return;

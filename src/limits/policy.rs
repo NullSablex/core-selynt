@@ -33,19 +33,19 @@ pub struct AppLimits {
 
 /// Ceiling for all of an account's apps together.
 ///
-/// The whole DirectAdmin allowance: that number is already the agreed limit for
+/// The whole `DirectAdmin` allowance: that number is already the agreed limit for
 /// the account, and the account's other services compete inside it.
 pub const fn slice_cap(account_limit: u64) -> u64 {
     account_limit
 }
 
 /// systemd unit name of the account's slice.
-pub(crate) fn slice_unit_name(username: &str) -> String {
+pub fn slice_unit_name(username: &str) -> String {
     format!("selynt-{username}.slice")
 }
 
 /// cgroup path of the account's slice.
-pub(crate) fn slice_cgroup(username: &str) -> String {
+pub fn slice_cgroup(username: &str) -> String {
     format!("/sys/fs/cgroup/selynt.slice/{}", slice_unit_name(username))
 }
 
@@ -54,7 +54,7 @@ pub(crate) fn slice_cgroup(username: &str) -> String {
 /// `pool` is [`slice_cap`], `running` counts the apps sharing it (including
 /// this one), and `pinned` is the ceiling the user chose, if any — a pin only
 /// ever narrows what the app may take.
-pub(crate) fn app_limits(pool: u64, running: usize, pinned: Option<u64>) -> AppLimits {
+pub fn app_limits(pool: u64, running: usize, pinned: Option<u64>) -> AppLimits {
     let fair = pool / running.max(1) as u64;
 
     // Reach well past the fair share when there is room. The slice is what
@@ -85,7 +85,7 @@ pub(crate) fn app_limits(pool: u64, running: usize, pinned: Option<u64>) -> AppL
 ///
 /// Requires `systemd-run` and a live system manager — a container without
 /// systemd as PID 1 has the binary but no bus to talk to.
-pub(crate) fn can_run_scopes() -> bool {
+pub fn can_run_scopes() -> bool {
     Path::new("/run/systemd/system").is_dir()
         && (Path::new("/usr/bin/systemd-run").exists() || Path::new("/bin/systemd-run").exists())
 }

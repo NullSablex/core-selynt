@@ -1,4 +1,4 @@
-//! Wires the panel into OpenLiteSpeed and DirectAdmin: the vhost templates
+//! Wires the panel into `OpenLiteSpeed` and `DirectAdmin`: the vhost templates
 //! carry the proxy blocks, and the web server's user is recorded so the socket
 //! ACL can name it.
 //!
@@ -12,14 +12,14 @@ use crate::sys::state::{DA_TEMPLATES, PLUGIN_PATH, STATE_BASE};
 
 /// Delimiters of the block the panel owns inside a shared template file.
 ///
-/// DirectAdmin templates may hold other people's customisations, so the block
+/// `DirectAdmin` templates may hold other people's customisations, so the block
 /// is replaced between its markers instead of the file being overwritten.
 pub const BEGIN_MARK: &str = "# BEGIN SELYNT_PANEL";
 pub const END_MARK: &str = "# END SELYNT_PANEL";
 
 /// Per-vhost proxy handler, pointing at the app's Unix socket.
 ///
-/// `|SDOMAIN|`, `|VH_PORT|` and `|USER|` are DirectAdmin template variables,
+/// `|SDOMAIN|`, `|VH_PORT|` and `|USER|` are `DirectAdmin` template variables,
 /// substituted when it generates each vhost.
 const TEMPLATE_CUSTOM_7: &str = "\
 # BEGIN SELYNT_PANEL
@@ -47,19 +47,19 @@ RewriteCond /var/lib/selynt_panel/|USER|/.proxy/|SDOMAIN| -f
 RewriteRule ^(.*)$ http://selynt_proxy-|SDOMAIN|-|VH_PORT|/$1 [P,L,E=PROXY-HOST:|HTTP_HOST|]
 # END SELYNT_PANEL";
 
-/// OpenLiteSpeed's configuration directory, whichever layout is in use.
+/// `OpenLiteSpeed`'s configuration directory, whichever layout is in use.
 ///
-/// DirectAdmin 1.690+ installs it under `/etc/openlitespeed`; older builds keep
+/// `DirectAdmin` 1.690+ installs it under `/etc/openlitespeed`; older builds keep
 /// it in `/usr/local/lsws/conf`.
-pub(crate) fn conf_dir() -> Option<&'static Path> {
+pub fn conf_dir() -> Option<&'static Path> {
     ["/etc/openlitespeed", "/usr/local/lsws/conf"]
         .into_iter()
         .map(Path::new)
         .find(|d| d.join("httpd_config.conf").is_file())
 }
 
-/// The main configuration file, when OpenLiteSpeed is installed.
-pub(crate) fn main_conf() -> Option<PathBuf> {
+/// The main configuration file, when `OpenLiteSpeed` is installed.
+pub fn main_conf() -> Option<PathBuf> {
     conf_dir().map(|d| d.join("httpd_config.conf"))
 }
 
@@ -99,11 +99,11 @@ fn upsert_block(path: &Path, block: &str) -> std::io::Result<()> {
     crate::sys::fs::set_perm(path, 0o644).map_err(std::io::Error::other)
 }
 
-/// The account OpenLiteSpeed runs as, which is what the socket ACL is granted
+/// The account `OpenLiteSpeed` runs as, which is what the socket ACL is granted
 /// to.
 ///
 /// Read from the server's own configuration first, then from the accounts a web
-/// server is normally installed as. DirectAdmin's OpenLiteSpeed config carries
+/// server is normally installed as. `DirectAdmin`'s `OpenLiteSpeed` config carries
 /// no `user` directive at all, so the fallback is the usual path, not the
 /// exception.
 fn detect_web_user() -> Option<String> {
@@ -137,11 +137,11 @@ fn detect_web_user() -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// Asks DirectAdmin to regenerate every vhost from the templates.
+/// Asks `DirectAdmin` to regenerate every vhost from the templates.
 ///
 /// Installing a template changes nothing on its own — the vhosts already on
 /// disk were generated from the previous version.
-pub(crate) fn rebuild_vhosts() -> bool {
+pub fn rebuild_vhosts() -> bool {
     let custombuild = Path::new("/usr/local/directadmin/custombuild");
     if custombuild.join("build").is_file() {
         return std::process::Command::new("./build")
@@ -164,13 +164,13 @@ pub(crate) fn rebuild_vhosts() -> bool {
 /// What the setup did, so the installer can report it.
 pub struct Outcome {
     pub web_user: Option<String>,
-    /// Whether DirectAdmin regenerated its vhosts from the new templates.
+    /// Whether `DirectAdmin` regenerated its vhosts from the new templates.
     /// Installing a template changes nothing until that happens.
     pub vhosts_rebuilt: bool,
 }
 
 /// Installs the templates and records the web server's user.
-pub(crate) fn run() -> Result<Outcome, (String, String)> {
+pub fn run() -> Result<Outcome, (String, String)> {
     if conf_dir().is_none() {
         return Err((
             "ols_missing".into(),
@@ -220,7 +220,7 @@ mod tests {
         std::env::temp_dir().join(format!("selynt-ols-{tag}-{}", std::process::id()))
     }
 
-    /// A template DirectAdmin ships, or an admin customised, must survive.
+    /// A template `DirectAdmin` ships, or an admin customised, must survive.
     #[test]
     fn keeps_content_that_is_not_ours() {
         let p = tmp("keep");

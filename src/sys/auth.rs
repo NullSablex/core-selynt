@@ -2,7 +2,7 @@
 //!
 //! The binary is setuid root, so the process is root regardless of who ran it.
 //! Authority comes from the **real** uid, preserved across the setuid, and from
-//! DirectAdmin's account database — never from `USERNAME`, which the caller
+//! `DirectAdmin`'s account database — never from `USERNAME`, which the caller
 //! supplies. Three levels: any account acts on its own apps,
 //! [`caller_is_privileged`] acts on behalf of one, [`caller_is_root`] installs.
 
@@ -15,7 +15,7 @@ use super::state::{DA_USERS_BASE, PLUGIN_PATH, validate_name};
 /// Buffer for `getpwnam_r`/`getpwuid_r`. 4 KiB covers any realistic passwd entry.
 const GETPWNAM_BUF_SIZE: usize = 4096;
 
-/// Files under the plugin's `etc/` naming the accounts DirectAdmin and the web
+/// Files under the plugin's `etc/` naming the accounts `DirectAdmin` and the web
 /// server run as. Written at install time by probing the running system, so a
 /// renamed account still resolves.
 const SERVICE_ACCOUNT_FILES: [&str; 3] = ["etc/da_user", "etc/da_cgi_user", "etc/ols_web_user"];
@@ -27,11 +27,11 @@ const SERVICE_ACCOUNT_FILES: [&str; 3] = ["etc/da_user", "etc/da_cgi_user", "etc
 /// The root prelude cannot use `$HOME`: it is inherited from whoever invoked
 /// the binary, which for the panel is the web server, not the account being
 /// acted on.
-pub(crate) fn lookup_home(username: &str) -> Option<String> {
+pub fn lookup_home(username: &str) -> Option<String> {
     lookup_user(username).ok().map(|(_, _, home)| home)
 }
 
-pub(crate) fn lookup_user_ids(username: &str) -> Option<(u32, u32)> {
+pub fn lookup_user_ids(username: &str) -> Option<(u32, u32)> {
     lookup_user(username).ok().map(|(uid, gid, _)| (uid, gid))
 }
 
@@ -39,7 +39,7 @@ pub(crate) fn lookup_user_ids(username: &str) -> Option<(u32, u32)> {
 ///
 /// A state directory can outlive the account it belongs to, and acting on one
 /// of those would resolve to nothing useful.
-pub(crate) fn user_exists(username: &str) -> bool {
+pub fn user_exists(username: &str) -> bool {
     lookup_user(username).is_ok()
 }
 
@@ -73,7 +73,7 @@ fn lookup_user(username: &str) -> Result<(u32, u32, String)> {
 }
 
 /// Resolves a uid back to its account name, if it has one.
-pub(crate) fn lookup_uid(uid: u32) -> Option<String> {
+pub fn lookup_uid(uid: u32) -> Option<String> {
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut buf = vec![0u8; GETPWNAM_BUF_SIZE];
     let mut result: *mut libc::passwd = ptr::null_mut();
@@ -97,12 +97,12 @@ pub(crate) fn lookup_uid(uid: u32) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// Path to a DirectAdmin account's `user.conf`.
+/// Path to a `DirectAdmin` account's `user.conf`.
 fn da_user_conf(username: &str) -> String {
     format!("{DA_USERS_BASE}/{username}/user.conf")
 }
 
-/// Reads `usertype=` for a DirectAdmin account: `admin`, `reseller` or `user`.
+/// Reads `usertype=` for a `DirectAdmin` account: `admin`, `reseller` or `user`.
 ///
 /// Lives under `data/users/`, which is `diradmin`-owned and `0700`, so it is
 /// readable only while still root — where authorisation is decided. The name is
@@ -121,28 +121,28 @@ fn parse_usertype(conf: &str) -> Option<String> {
         .map(|v| v.trim().to_string())
 }
 
-/// True when a DirectAdmin `usertype` may act on other accounts.
+/// True when a `DirectAdmin` `usertype` may act on other accounts.
 fn usertype_is_privileged(usertype: Option<&str>) -> bool {
     matches!(usertype, Some("admin" | "reseller"))
 }
 
 /// Whether the caller may install, reconfigure or remove the plugin.
 ///
-/// Stricter than [`caller_is_privileged`]: the web server and DirectAdmin's CGI
+/// Stricter than [`caller_is_privileged`]: the web server and `DirectAdmin`'s CGI
 /// account act *on behalf of* an account, but must not be able to take the
 /// panel apart — a compromised CGI endpoint would otherwise stop every app on
 /// the server.
-pub(crate) fn caller_is_root() -> bool {
+pub fn caller_is_root() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
 /// Whether the caller may act on other accounts and run `admin` commands.
 ///
-/// Authority comes from `usertype=` in DirectAdmin's database, not from a list
+/// Authority comes from `usertype=` in `DirectAdmin`'s database, not from a list
 /// of names: the admin account can be renamed and there can be many resellers.
 /// Root, an `admin`/`reseller` account, and the service accounts in
 /// [`SERVICE_ACCOUNT_FILES`] qualify; a plain `user` never does.
-pub(crate) fn caller_is_privileged() -> bool {
+pub fn caller_is_privileged() -> bool {
     let caller_uid = unsafe { libc::getuid() };
     if caller_uid == 0 {
         return true;
@@ -171,7 +171,7 @@ pub(crate) fn caller_is_privileged() -> bool {
 /// account run `USERNAME=victim core-selynt ...` with root behind it. Authority
 /// comes from the real uid instead: privileged callers may name any account,
 /// everyone else acts only as themselves.
-pub(crate) fn resolve_target_user() -> Result<(u32, u32, String, String)> {
+pub fn resolve_target_user() -> Result<(u32, u32, String, String)> {
     let caller_uid = unsafe { libc::getuid() };
     let caller = lookup_uid(caller_uid);
     let trusted = caller_is_privileged();
@@ -179,9 +179,7 @@ pub(crate) fn resolve_target_user() -> Result<(u32, u32, String, String)> {
     let username = match (std::env::var("USERNAME"), trusted) {
         (Ok(requested), true) => requested,
         (Ok(requested), false) => {
-            let own = caller
-                .clone()
-                .context("caller uid has no account in /etc/passwd")?;
+            let own = caller.context("caller uid has no account in /etc/passwd")?;
             if requested != own {
                 anyhow::bail!(
                     "refusing to act as {requested:?}: caller is {own:?} (uid {caller_uid})"
@@ -209,7 +207,7 @@ pub(crate) fn resolve_target_user() -> Result<(u32, u32, String, String)> {
 /// root. Uses `initgroups` so the process keeps the user's supplementary
 /// groups — required to reach group-restricted runtime binaries (e.g. node in
 /// `/usr/local/bin/` on `CloudLinux`).
-pub(crate) fn drop_privileges(uid: u32, gid: u32, username: &str) -> Result<()> {
+pub fn drop_privileges(uid: u32, gid: u32, username: &str) -> Result<()> {
     let cname = std::ffi::CString::new(username).context("invalid username for initgroups")?;
     unsafe {
         if libc::initgroups(cname.as_ptr(), gid) != 0 {

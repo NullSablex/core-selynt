@@ -4,7 +4,7 @@
 //! where its memory ceiling applies, and how [`netguard`] finds every process
 //! it spawned — including children the panel never saw start.
 
-pub(crate) mod netguard;
-pub(crate) mod policy;
-pub(crate) mod sandbox;
-pub(crate) mod usage;
+pub mod netguard;
+pub mod policy;
+pub mod sandbox;
+pub mod usage;

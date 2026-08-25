@@ -29,7 +29,7 @@ fn scope_cgroup(username: &str, name: &str) -> String {
 /// The cgroup is what makes a whole-app check possible: a child process is
 /// still in it, however it was started, so callers do not have to walk the
 /// process tree themselves. Empty when the app is not running.
-pub(crate) fn scope_pids(username: &str, name: &str) -> Vec<u32> {
+pub fn scope_pids(username: &str, name: &str) -> Vec<u32> {
     let procs = Path::new(&scope_cgroup(username, name)).join("cgroup.procs");
     let Ok(content) = std::fs::read_to_string(procs) else {
         return Vec::new();
@@ -78,7 +78,7 @@ pub struct ScopeUsage {
 
 /// Reads an app's cgroup usage, or `None` when the scope is not present (the
 /// app is stopped, or systemd is unavailable and it runs outside a scope).
-pub(crate) fn read_scope_usage(username: &str, name: &str) -> Option<ScopeUsage> {
+pub fn read_scope_usage(username: &str, name: &str) -> Option<ScopeUsage> {
     let dir = std::path::PathBuf::from(scope_cgroup(username, name));
     if !dir.is_dir() {
         return None;
@@ -91,17 +91,17 @@ pub(crate) fn read_scope_usage(username: &str, name: &str) -> Option<ScopeUsage>
     })
 }
 
-/// Account resource limits as configured in DirectAdmin.
+/// Account resource limits as configured in `DirectAdmin`.
 #[derive(Default, Clone, Copy)]
 pub struct DaLimits {
     pub memory_max: Option<u64>,
     pub cpu_quota_percent: Option<u32>,
 }
 
-/// Reads the account's limits from DirectAdmin. **Must run as root**:
+/// Reads the account's limits from `DirectAdmin`. **Must run as root**:
 /// `data/users/` is `diradmin`-owned and `0700`, so after the privilege drop
 /// this silently returns nothing and every app looks unlimited.
-pub(crate) fn read_da_limits(username: &str) -> DaLimits {
+pub fn read_da_limits(username: &str) -> DaLimits {
     DaLimits {
         memory_max: da_limit(username, "MemoryMax")
             .as_deref()
@@ -112,7 +112,7 @@ pub(crate) fn read_da_limits(username: &str) -> DaLimits {
     }
 }
 
-/// Reads a `key=value` field from a DirectAdmin `user.conf`.
+/// Reads a `key=value` field from a `DirectAdmin` `user.conf`.
 fn da_limit(username: &str, key: &str) -> Option<String> {
     let conf = std::fs::read_to_string(format!("{DA_USERS_BASE}/{username}/user.conf")).ok()?;
     let prefix = format!("{key}=");
@@ -198,7 +198,7 @@ fn machine_ram_bytes() -> Option<u64> {
     })
 }
 
-pub(crate) fn cmd_stats(
+pub fn cmd_stats(
     state_dir: &Path,
     name: &str,
     username: &str,
@@ -254,8 +254,8 @@ fn scope_is_live(username: &str, name: &str) -> bool {
 }
 
 /// Resolves the memory cap for one app, reading the account allowance from
-/// DirectAdmin and every sibling app's own setting. Must run as root.
-pub(crate) fn app_limits_for(
+/// `DirectAdmin` and every sibling app's own setting. Must run as root.
+pub fn app_limits_for(
     state_dir: &Path,
     username: &str,
     name: &str,
@@ -266,7 +266,7 @@ pub(crate) fn app_limits_for(
 
 /// [`app_limits_for`], counting `pending` as running even though its scope does
 /// not exist yet.
-pub(crate) fn app_limits_for_with(
+pub fn app_limits_for_with(
     state_dir: &Path,
     username: &str,
     name: &str,
@@ -316,19 +316,19 @@ pub(crate) fn app_limits_for_with(
 /// re-resolved on every change; waiting for the next start would leave them
 /// adding up to more than the account owns. `--runtime` applies to the live
 /// scope and keeps it out of /etc — the `.app` file is the source of truth.
-pub(crate) fn reapply_app_limits(state_dir: &Path, username: &str) {
+pub fn reapply_app_limits(state_dir: &Path, username: &str) {
     reapply_app_limits_with(state_dir, username, "", "");
 }
 
 /// Same as [`reapply_app_limits`], but treats `leaving` as already gone — used
 /// when stopping an app, whose scope outlives the prelude that decides limits.
-pub(crate) fn reapply_app_limits_excluding(state_dir: &Path, username: &str, leaving: &str) {
+pub fn reapply_app_limits_excluding(state_dir: &Path, username: &str, leaving: &str) {
     reapply_app_limits_with(state_dir, username, "", leaving);
 }
 
 /// Same as [`reapply_app_limits`], but also counts `pending` — an app that is about
 /// to start and therefore has no scope yet.
-pub(crate) fn reapply_app_limits_including(state_dir: &Path, username: &str, pending: &str) {
+pub fn reapply_app_limits_including(state_dir: &Path, username: &str, pending: &str) {
     reapply_app_limits_with(state_dir, username, pending, "");
 }
 
@@ -346,20 +346,25 @@ fn reapply_app_limits_with(state_dir: &Path, username: &str, pending: &str, leav
         }
         let unit = format!("selynt-{username}-{name}.scope");
 
-        let props = match app_limits_for_with(state_dir, username, &name, &meta, pending, leaving) {
-            Some(l) => vec![
-                format!("MemoryMin={}", l.min),
-                format!("MemoryHigh={}", l.high),
-                format!("MemoryMax={}", l.max),
-            ],
-            // Explicit clearing: omitting a property leaves the old value in
-            // place, so an account losing its limit would keep the last cap.
-            None => vec![
-                "MemoryMin=0".to_string(),
-                "MemoryHigh=infinity".to_string(),
-                "MemoryMax=infinity".to_string(),
-            ],
-        };
+        let props = app_limits_for_with(state_dir, username, &name, &meta, pending, leaving)
+            .map_or_else(
+                // Explicit clearing: omitting a property leaves the old value
+                // in place, so an account losing its limit would keep the cap.
+                || {
+                    vec![
+                        "MemoryMin=0".to_string(),
+                        "MemoryHigh=infinity".to_string(),
+                        "MemoryMax=infinity".to_string(),
+                    ]
+                },
+                |l| {
+                    vec![
+                        format!("MemoryMin={}", l.min),
+                        format!("MemoryHigh={}", l.high),
+                        format!("MemoryMax={}", l.max),
+                    ]
+                },
+            );
 
         let mut cmd = std::process::Command::new("systemctl");
         cmd.args(["set-property", "--runtime", &unit]);
@@ -377,15 +382,15 @@ fn reapply_app_limits_with(state_dir: &Path, username: &str, pending: &str, leav
 /// deliberately allowed to add up to more than this, and the slice is what
 /// stops them. Called before and after a spawn — before, the slice may not
 /// exist yet and the call simply fails; after, it exists and takes effect.
-pub(crate) fn ensure_slice_cap(username: &str, cap: Option<u64>) {
+pub fn ensure_slice_cap(username: &str, cap: Option<u64>) {
     if !super::policy::can_run_scopes() {
         return;
     }
     let unit = super::policy::slice_unit_name(username);
-    let value = match cap {
-        Some(bytes) => format!("MemoryMax={bytes}"),
-        None => "MemoryMax=infinity".to_string(),
-    };
+    let value = cap.map_or_else(
+        || "MemoryMax=infinity".to_string(),
+        |bytes| format!("MemoryMax={bytes}"),
+    );
     let _ = std::process::Command::new("systemctl")
         .args(["set-property", "--runtime", &unit, &value])
         .stdout(std::process::Stdio::null())
@@ -425,7 +430,7 @@ mod tests {
 
 #[cfg(test)]
 mod da_limit_tests {
-    /// DirectAdmin writes the key with no value when the account has no limit,
+    /// `DirectAdmin` writes the key with no value when the account has no limit,
     /// and can carry a second line with the real one. Taking the first match
     /// found the empty one and reported "no limit".
     #[test]

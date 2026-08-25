@@ -36,7 +36,7 @@ fn is_externally_bound(local_addr: &str) -> bool {
     }
 }
 
-pub(crate) fn read_proc_uid(pid: u32) -> Option<u32> {
+pub fn read_proc_uid(pid: u32) -> Option<u32> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     content
         .lines()
@@ -48,19 +48,19 @@ pub(crate) fn read_proc_uid(pid: u32) -> Option<u32> {
 ///
 /// The `comm` field can contain spaces and parentheses, so we use `rfind(')')`
 /// to locate its end before tokenising the rest of the line.
-pub(crate) fn read_proc_starttime(pid: u32) -> Option<u64> {
+pub fn read_proc_starttime(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_paren = content.rfind(')')?;
     let rest = &content[after_paren + 2..];
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-pub(crate) fn is_process_alive(pid: u32) -> bool {
+pub fn is_process_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// Sum of `utime + stime` from `/proc/{pid}/stat` — total CPU ticks consumed.
-pub(crate) fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
+pub fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_paren = content.rfind(')')?;
     let rest = &content[after_paren + 2..];
@@ -71,7 +71,7 @@ pub(crate) fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
 }
 
 /// `VmRSS` in kilobytes from `/proc/{pid}/status`.
-pub(crate) fn read_proc_rss_kb(pid: u32) -> Option<u64> {
+pub fn read_proc_rss_kb(pid: u32) -> Option<u64> {
     let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     content
         .lines()
@@ -85,7 +85,7 @@ pub struct ProcessSnapshot {
     pub rss_kb: u64,
 }
 
-pub(crate) fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+pub fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let cpu_ticks = read_proc_cpu_ticks(pid)?;
     let rss_kb = read_proc_rss_kb(pid).unwrap_or_default();
     Some(ProcessSnapshot { cpu_ticks, rss_kb })
@@ -162,7 +162,7 @@ fn socket_inodes_of(pid: u32) -> HashSet<u64> {
 ///
 /// A sandboxed app sits under a bwrap process, and bwrap does not pass signals
 /// on to it, so stopping the app means signalling the children too.
-pub(crate) fn descendants_of(pid: u32) -> Vec<u32> {
+pub fn descendants_of(pid: u32) -> Vec<u32> {
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
@@ -204,7 +204,7 @@ fn read_proc_ppid(pid: u32) -> Option<u32> {
 /// covers the app's own process, so a child spawned without it — or an app that
 /// is not Node at all — can bind freely. Passing every PID in the app's cgroup
 /// closes that path.
-pub(crate) fn has_external_listen(pids: &[u32]) -> bool {
+pub fn has_external_listen(pids: &[u32]) -> bool {
     let mut socket_inodes: HashSet<u64> = HashSet::new();
     for &pid in pids {
         socket_inodes.extend(socket_inodes_of(pid));

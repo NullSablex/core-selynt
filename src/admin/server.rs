@@ -9,11 +9,11 @@ use crate::sys::state::PLUGIN_PATH;
 use crate::app::{admin_get_status, with_debug};
 use crate::runtime::detect::detect_node_versions;
 
-pub(crate) fn cmd_admin_list(apps: &[Value], dbg: Option<&Value>) -> ! {
+pub fn cmd_admin_list(apps: &[Value], dbg: Option<&Value>) -> ! {
     success(with_debug(json!({ "apps": apps }), dbg))
 }
 
-pub(crate) fn cmd_admin_detect_nodes(dbg: Option<&Value>) -> ! {
+pub fn cmd_admin_detect_nodes(dbg: Option<&Value>) -> ! {
     let versions: Vec<Value> = detect_node_versions()
         .into_iter()
         .map(|(path, ver)| json!({"version": ver, "path": path}))
@@ -63,7 +63,7 @@ fn describe_app(run_dir: &Path, path: &Path, user: &str) -> Option<Value> {
 }
 
 /// Every app on the server, for the administrator's overview.
-pub(crate) fn collect_admin_list() -> Vec<Value> {
+pub fn collect_admin_list() -> Vec<Value> {
     let mut apps = Vec::new();
 
     for (user_home, user) in crate::sys::state::list_accounts() {
@@ -92,7 +92,7 @@ pub(crate) fn collect_admin_list() -> Vec<Value> {
 }
 
 /// Persists the server-wide default for whether new apps start isolated.
-pub(crate) fn save_default_isolated(isolated: bool) -> Result<Value, (String, String)> {
+pub fn save_default_isolated(isolated: bool) -> Result<Value, (String, String)> {
     let etc_dir = Path::new(PLUGIN_PATH).join("etc");
     if !etc_dir.is_dir() {
         std::fs::create_dir_all(&etc_dir).map_err(|e| {
@@ -165,7 +165,7 @@ fn resolve_selection(indices: &[usize]) -> Result<Vec<String>, (String, String)>
 }
 
 /// Persists the runtimes the administrator chose.
-pub(crate) fn save_node_versions(indices: &[usize]) -> Result<Value, (String, String)> {
+pub fn save_node_versions(indices: &[usize]) -> Result<Value, (String, String)> {
     let selected = resolve_selection(indices)?;
 
     let etc_dir = Path::new(PLUGIN_PATH).join("etc");

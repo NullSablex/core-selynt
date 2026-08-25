@@ -41,14 +41,14 @@ fn invalid_locale_err() -> (String, String) {
 
 /// Persists the plugin-wide default language to `<STATE_BASE>/locale`. An empty
 /// `locale` clears it (falling back to the built-in default).
-pub(crate) fn set_locale_global(locale: &str) -> Result<Value, (String, String)> {
+pub fn set_locale_global(locale: &str) -> Result<Value, (String, String)> {
     let path = Path::new(STATE_BASE).join("locale");
     write_locale(&path, locale).map(|code| json!({ "global": code }))
 }
 
 /// Persists the current user's own language preference to
 /// `<state_dir>/locale`, owned by the user so the read path stays simple.
-pub(crate) fn set_locale_user(
+pub fn set_locale_user(
     state_dir: &Path,
     locale: &str,
     uid: u32,

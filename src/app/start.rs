@@ -22,7 +22,7 @@ use super::{get_status, signal_sync, to_nix_pid, validate_safe_component, with_d
 use crate::runtime::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
 
 /// Absolute ceiling for socket creation (any app type).
-const SOCKET_HARD_TIMEOUT: Duration = Duration::from_secs(120);
+const SOCKET_HARD_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Time between progress snapshots. 2.5s absorbs scheduling jitter and Node
 /// GC pauses without raising false positives.
@@ -99,7 +99,7 @@ fn publish_route(
         .and_then(|()| std::fs::set_permissions(&enabled, std::fs::Permissions::from_mode(0o600)));
 }
 
-pub(crate) fn cmd_start(
+pub fn cmd_start(
     state_dir: &Path,
     name: &str,
     username: &str,
@@ -139,17 +139,16 @@ pub(crate) fn cmd_start(
 
     // Normally the app was already spawned into its own systemd scope by the
     // root prelude; fall back to spawning here when that path is unavailable.
-    let pid = match spawned_pid {
-        Some(p) => p,
-        None => spawn_app(
+    let pid = spawned_pid.unwrap_or_else(|| {
+        spawn_app(
             &meta,
             name,
             &socket_path,
             None,
             None,
             crate::sys::state::account_is_isolated(state_dir),
-        ),
-    };
+        )
+    });
 
     if let Err(e) = persist_state(&pid_file, &meta_file, pid, &socket_path) {
         let _ = kill(to_nix_pid(pid), Signal::SIGKILL);
@@ -182,7 +181,7 @@ pub(crate) fn cmd_start(
 ///
 /// Returns `None` when systemd is unavailable, leaving `cmd_start` to spawn the
 /// app the ordinary way after the drop.
-pub(crate) fn spawn_into_scope(
+pub fn spawn_into_scope(
     meta: &AppMeta,
     name: &str,
     state_dir: &Path,
@@ -309,7 +308,7 @@ fn spawn_app(
     if let Some((username, uid, gid)) = scope
         && crate::limits::policy::can_run_scopes()
     {
-        cmd = wrap_in_scope(cmd, username, name, uid, gid, limits);
+        cmd = wrap_in_scope(&cmd, username, name, uid, gid, limits.as_ref());
     }
 
     // Applied after wrapping: these are not readable back off a Command, so
@@ -396,12 +395,12 @@ fn scope_unit_name(username: &str, name: &str) -> String {
 /// before the drop and lets `--uid`/`--gid` perform it. `--collect` clears the
 /// unit on exit, so a crash leaves nothing blocking the next start.
 fn wrap_in_scope(
-    cmd: Command,
+    cmd: &Command,
     username: &str,
     name: &str,
     uid: u32,
     gid: u32,
-    limits: Option<crate::limits::policy::AppLimits>,
+    limits: Option<&crate::limits::policy::AppLimits>,
 ) -> Command {
     let mut run = Command::new("systemd-run");
     run.arg("--scope")
@@ -639,7 +638,7 @@ mod tests {
     fn wrap_in_scope_keeps_program_and_args() {
         let mut inner = Command::new("/usr/bin/node");
         inner.arg("--import").arg("/tmp/loader.js").arg("/app/i.js");
-        let wrapped = wrap_in_scope(inner, "bob", "api", 1003, 1003, None);
+        let wrapped = wrap_in_scope(&inner, "bob", "api", 1003, 1003, None);
 
         assert_eq!(wrapped.get_program(), "systemd-run");
         let args: Vec<String> = wrapped
@@ -661,7 +660,7 @@ mod tests {
     /// --uid/--gid the app would keep running as root.
     #[test]
     fn wrap_in_scope_drops_privileges_via_systemd() {
-        let wrapped = wrap_in_scope(Command::new("/bin/true"), "bob", "api", 1003, 1004, None);
+        let wrapped = wrap_in_scope(&Command::new("/bin/true"), "bob", "api", 1003, 1004, None);
         let args: Vec<String> = wrapped
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -680,12 +679,12 @@ mod tests {
             max: 128 * 1024 * 1024,
         };
         let wrapped = wrap_in_scope(
-            Command::new("/bin/true"),
+            &Command::new("/bin/true"),
             "bob",
             "api",
             1003,
             1003,
-            Some(limits),
+            Some(&limits),
         );
         let args: Vec<String> = wrapped
             .get_args()
@@ -701,7 +700,7 @@ mod tests {
     /// unconstrained — the behaviour before limits existed.
     #[test]
     fn wrap_in_scope_omits_properties_without_limits() {
-        let wrapped = wrap_in_scope(Command::new("/bin/true"), "bob", "api", 1003, 1003, None);
+        let wrapped = wrap_in_scope(&Command::new("/bin/true"), "bob", "api", 1003, 1003, None);
         let args: Vec<String> = wrapped
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -713,7 +712,7 @@ mod tests {
     fn wrap_in_scope_carries_environment_over() {
         let mut inner = Command::new("/bin/true");
         inner.env("SELYNT_SOCKET", "/run/app.sock");
-        let wrapped = wrap_in_scope(inner, "bob", "api", 1003, 1003, None);
+        let wrapped = wrap_in_scope(&inner, "bob", "api", 1003, 1003, None);
         let found = wrapped
             .get_envs()
             .any(|(k, v)| k == "SELYNT_SOCKET" && v == Some("/run/app.sock".as_ref()));

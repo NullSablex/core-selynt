@@ -4,8 +4,8 @@
 //! expected state and the other verifies it, so they share
 //! [`tree::expected_mode`] rather than each carrying a copy that could drift.
 
-pub(crate) mod diagnose;
-pub(crate) mod setup;
-pub(crate) mod teardown;
-pub(crate) mod tree;
-pub(crate) mod units;
+pub mod diagnose;
+pub mod setup;
+pub mod teardown;
+pub mod tree;
+pub mod units;

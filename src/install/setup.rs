@@ -17,16 +17,16 @@ use crate::app::with_debug;
 
 /// Accounts the panel needs to know about, resolved from the running system.
 struct Identities {
-    /// The account DirectAdmin itself runs as.
+    /// The account `DirectAdmin` itself runs as.
     da_user: String,
     da_uid: Option<u32>,
-    /// The account DirectAdmin executes plugin CGI as. Not the web server user:
+    /// The account `DirectAdmin` executes plugin CGI as. Not the web server user:
     /// plugin pages are served by DA's `legacy-handler`, which drops to
     /// `nobody` on a stock install.
     cgi_user: Option<String>,
 }
 
-/// Finds the account DirectAdmin runs as.
+/// Finds the account `DirectAdmin` runs as.
 ///
 /// `diradmin` on a normal install; the fallbacks cover setups that renamed it.
 fn detect_da_user() -> String {
@@ -112,7 +112,7 @@ fn prepare_state_dir(owner_uid: Option<u32>) -> Result<(), String> {
 
 /// Reclaims ownership of the plugin tree and applies the expected modes.
 ///
-/// DirectAdmin's Plugin Manager extracts the tarball as whatever account it
+/// `DirectAdmin`'s Plugin Manager extracts the tarball as whatever account it
 /// runs the upload as, leaving the tree owned by an unprivileged user on stock
 /// images — one that could then rewrite the CGI endpoints, and the installer
 /// itself. The modes come from the same function the diagnostic checks against.
@@ -179,7 +179,7 @@ fn chown_tree(root: &Path) -> std::io::Result<()> {
 }
 
 /// Records the accounts and prepares the state directory.
-pub(crate) fn run() -> Result<Value, (String, String)> {
+pub fn run() -> Result<Value, (String, String)> {
     let ids = detect_identities();
 
     write_etc("da_user", &ids.da_user).map_err(|e| ("write_failed".to_string(), e))?;
@@ -218,7 +218,7 @@ pub(crate) fn run() -> Result<Value, (String, String)> {
 }
 
 /// CLI entry point.
-pub(crate) fn cmd_setup(dbg: Option<&Value>) -> ! {
+pub fn cmd_setup(dbg: Option<&Value>) -> ! {
     match run() {
         Ok(v) => success(with_debug(v, dbg)),
         Err((code, msg)) => crate::sys::output::system_error(&code, &msg),

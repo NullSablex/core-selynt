@@ -121,8 +121,8 @@ enum Commands {
 
     /// Prepares everything the plugin needs to run.
     ///
-    /// Records which accounts DirectAdmin uses, creates the state directory and
-    /// wires the panel into OpenLiteSpeed. Run by the installer; safe to re-run.
+    /// Records which accounts `DirectAdmin` uses, creates the state directory and
+    /// wires the panel into `OpenLiteSpeed`. Run by the installer; safe to re-run.
     Setup,
 
     /// Regenerates the web server's proxy handlers for every live app.
@@ -270,7 +270,7 @@ fn run_server_wide(command: ServerWide, debug: bool) -> ! {
 
     match command {
         ServerWide::BootRecover => {
-            app::boot::cmd_boot_recover(app::boot::recover_all(), dbg.as_ref())
+            app::boot::cmd_boot_recover(&app::boot::recover_all(), dbg.as_ref())
         }
         ServerWide::NetguardAll => {
             limits::netguard::report(Some(limits::netguard::sweep_all_accounts()), dbg.as_ref())

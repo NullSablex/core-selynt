@@ -4,6 +4,6 @@
 //! in front has to route to it. Supporting Apache or Nginx means writing
 //! siblings to [`ols`] and [`proxysync`], and nothing outside this directory.
 
-pub(crate) mod acl;
-pub(crate) mod ols;
-pub(crate) mod proxysync;
+pub mod acl;
+pub mod ols;
+pub mod proxysync;

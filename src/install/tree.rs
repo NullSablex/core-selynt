@@ -17,7 +17,7 @@ pub(super) fn mode_of(path: &Path) -> Option<u32> {
 }
 
 /// The permissions a file under the plugin tree is expected to have.
-pub(crate) fn expected_mode(path: &Path) -> u32 {
+pub fn expected_mode(path: &Path) -> u32 {
     let s = path.to_string_lossy();
     if s.ends_with(".service") {
         return 0o644;
@@ -33,7 +33,7 @@ pub(crate) fn expected_mode(path: &Path) -> u32 {
 }
 
 /// Walks a directory tree, calling `visit` for every directory found.
-pub(crate) fn walk_dirs(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+pub fn walk_dirs(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     visit(dir);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -50,7 +50,7 @@ pub(crate) fn walk_dirs(dir: &Path, visit: &mut dyn FnMut(&Path)) {
 }
 
 /// Walks a directory tree, calling `visit` for every file found.
-pub(crate) fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+pub fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
