@@ -56,6 +56,20 @@ fn node_candidates() -> Vec<PathBuf> {
 
 /// Detects Node.js runtimes installed on the system. Returns
 /// `Vec<(path, version)>` — e.g. `("/usr/bin/node", "v22.22.0")`.
+/// The interpreter to execute when an app names no version of its own.
+///
+/// Returns an absolute path, never the bare name: the app is launched with the
+/// environment of whoever invoked the panel, and the CGI's `PATH` does not
+/// carry `/usr/local/bin`. Relying on `PATH` made a Node app start from a shell
+/// and fail from the panel — inside the sandbox, as `execvp node: No such file
+/// or directory`.
+pub fn default_node_path() -> Option<String> {
+    NODE_FIXED_PATHS
+        .iter()
+        .find(|p| Path::new(p).is_file())
+        .map(|p| (*p).to_string())
+}
+
 pub fn detect_node_versions() -> Vec<(String, String)> {
     let candidates = node_candidates();
 
@@ -156,7 +170,7 @@ fn is_root_owned_and_unwritable(path: &Path) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use super::is_trusted_runtime_path;
+    use super::{NODE_FIXED_PATHS, default_node_path, is_trusted_runtime_path};
     use std::path::Path;
 
     #[test]
@@ -221,6 +235,26 @@ mod tests {
                 !is_trusted_runtime_path(Path::new(p)),
                 "{p} must be rejected"
             );
+        }
+    }
+
+    /// The default interpreter must be an absolute path.
+    ///
+    /// It used to be the bare name `node`, resolved through `PATH`. The app
+    /// inherits the environment of whoever invoked the panel, and the CGI's
+    /// `PATH` has no `/usr/local/bin` — so an app that started fine from a
+    /// shell died from the panel with `execvp node: No such file or directory`,
+    /// and switching isolation left it down.
+    #[test]
+    fn default_node_path_is_absolute_or_none() {
+        if let Some(p) = default_node_path() {
+            assert!(
+                std::path::Path::new(&p).is_absolute(),
+                "{p} must not depend on PATH"
+            );
+        }
+        for p in NODE_FIXED_PATHS {
+            assert!(p.starts_with('/'), "{p} must be absolute");
         }
     }
 }
