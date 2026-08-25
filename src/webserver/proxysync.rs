@@ -1,15 +1,12 @@
 //! Regenerates the OpenLiteSpeed proxy handlers for every live app.
 //!
-//! An app serves over a Unix socket, and OpenLiteSpeed only reaches it through
-//! an `extProcessor` naming that socket. This rewrites the whole set from the
-//! apps that are actually up, then reloads the web server.
-//!
-//! Runs on a schedule, and only when the panel left a marker saying the app set
-//! changed — rewriting on every tick would restart the web server for nothing.
+//! Rewrites the whole set from the apps that are up, then reloads — but only
+//! when the panel left a marker saying the set changed, since rewriting on
+//! every tick would restart the web server for nothing.
 //!
 //! It cannot be done inline by the command that changed things: that runs after
-//! the privilege drop, which sets `PR_SET_NO_NEW_PRIVS`, and children inherit
-//! it — so re-invoking the setuid binary yields an unprivileged process.
+//! the drop, which sets `PR_SET_NO_NEW_PRIVS`, so re-invoking the setuid binary
+//! yields an unprivileged process.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;

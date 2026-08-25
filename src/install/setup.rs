@@ -1,13 +1,8 @@
 //! Everything the plugin has to put in place before it can work.
 //!
-//! The three accounts recorded here are what the binary later uses to decide
-//! who may act on whose apps, so getting one wrong is not a cosmetic problem:
-//! too narrow and every panel action is refused, too broad and an account the
-//! panel does not control is trusted.
-//!
-//! Kept in the binary rather than in the installer script because it is the
-//! binary that reads these files back, and because it runs as root — the same
-//! reason the rest of the shell work moved here.
+//! The three accounts recorded here decide who may act on whose apps: too
+//! narrow and every panel action is refused, too broad and an account the panel
+//! does not control is trusted.
 
 use std::path::{Path, PathBuf};
 
@@ -118,13 +113,9 @@ fn prepare_state_dir(owner_uid: Option<u32>) -> Result<(), String> {
 /// Reclaims ownership of the plugin tree and applies the expected modes.
 ///
 /// DirectAdmin's Plugin Manager extracts the tarball as whatever account it
-/// happens to run the upload as, which on stock images leaves the tree owned by
-/// an unprivileged user. That account could then rewrite the CGI endpoints the
-/// panel executes — and the installer itself, which runs as root on the next
-/// update.
-///
-/// The modes come from the same function the diagnostic checks against, so
-/// applying and verifying cannot drift apart.
+/// runs the upload as, leaving the tree owned by an unprivileged user on stock
+/// images — one that could then rewrite the CGI endpoints, and the installer
+/// itself. The modes come from the same function the diagnostic checks against.
 fn apply_ownership() -> Result<(), String> {
     let root = Path::new(PLUGIN_PATH);
 

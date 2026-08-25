@@ -177,21 +177,15 @@ pub(crate) fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
     ))
 }
 
-/// Turns isolation on or off for the whole account.
-///
-/// It is deliberately not per-app: a namespace confines what the process inside
-/// it sees, but does not change its uid, so one non-isolated app could still
-/// read an isolated sibling's files and signal its processes. Isolation only
-/// means anything when it covers every app of the account.
 /// Switches the account's isolation mode and restarts its running apps.
 ///
-/// Runs as root, in the prelude. Isolation is decided when an app is launched
-/// and it moves the app's socket, so a running app keeps its old mode until it
-/// is restarted — leaving that to the user would make the setting look like it
-/// had no effect. Recreating each systemd scope is privileged work, which is
-/// why this cannot happen after the drop.
+/// Not per-app on purpose: a namespace confines what the process inside sees
+/// but does not change its uid, so a non-isolated sibling could still read an
+/// isolated app's files. It only means anything covering the whole account.
 ///
-/// Returns the apps that came back up, and those that did not.
+/// Runs as root — recreating each systemd scope is privileged, and an app keeps
+/// the mode it launched with until restarted. Returns the apps that came back
+/// up, and those that did not.
 pub(crate) fn switch_isolation(
     state_dir: &Path,
     username: &str,

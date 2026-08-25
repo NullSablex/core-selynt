@@ -1,19 +1,12 @@
-//! Optional per-app isolation, built on mount and PID namespaces.
+//! Per-account isolation, built on mount and PID namespaces.
 //!
-//! Apps of one account all run as that account's user, so by default they can
-//! read each other's files, signal each other's processes and reach each
-//! other's sockets. That matches how shared hosting has always worked, and for
-//! a single owner's apps it is usually what they want.
+//! An account's apps run as the same user, so by default they can read each
+//! other's files and signal each other's processes. Isolated, each runs where
+//! the neighbours do not exist — still as the account, since a system user per
+//! app would fill `/etc/passwd` with entries DirectAdmin knows nothing about.
 //!
-//! When it is not, an app can be marked isolated. It still runs as the account
-//! — creating a system user per app would put hundreds of entries in
-//! `/etc/passwd` that DirectAdmin knows nothing about — but inside namespaces
-//! where its neighbours simply do not exist: their files are not in the mount
-//! tree and their processes are not in the PID namespace.
-//!
-//! The sandbox goes *inside* the systemd scope, never around it, so the app
-//! stays in its own cgroup and both the memory limits and the netguard sweep
-//! keep working.
+//! The sandbox goes *inside* the systemd scope: the app must stay in its own
+//! cgroup for the memory limits and the netguard sweep to keep working.
 
 use std::path::Path;
 use std::process::Command;
@@ -61,16 +54,10 @@ fn user_namespaces_enabled() -> bool {
 
 /// Wraps `cmd` so it runs seeing only its own directory and processes.
 ///
-/// `app_dir` is the app's working directory; `socket_path` is the Unix socket
-/// the proxy connects to. Both are bound read-write, since the app owns them.
-/// Everything else in the account's home — every sibling app — is left out of
-/// the mount namespace entirely.
-///
-/// An isolated app gets its own directory under `.sockets/`, and only that
-/// directory is bound into the namespace. A tmpfs would hide the neighbours
-/// too, but the socket created on it would exist only inside the namespace and
-/// the proxy could never reach it — the socket has to be a real file on the
-/// host, in a directory the app alone can see.
+/// The app's working directory and its socket directory are bound read-write;
+/// the rest of the account's home is left out of the mount namespace. A tmpfs
+/// would hide the neighbours too, but the socket created on it would exist only
+/// inside the namespace and the proxy could never reach it.
 pub(crate) fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
     let Some(bwrap) = bwrap_path() else {
         return cmd;

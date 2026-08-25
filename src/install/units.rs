@@ -1,13 +1,9 @@
 //! The systemd units the panel installs, and their lifecycle.
 //!
-//! Embedded rather than shipped as files under `scripts/`. Each one names this
-//! binary as what root executes, so leaving them on disk as separate files
-//! meant a second place where that instruction could be rewritten — the same
-//! reason the shell scripts went away.
-//!
-//! It also removes a whole class of mistake: a unit that exists in the tree but
-//! that the installer forgets to copy is a feature silently absent. The list
-//! below *is* the installer's list.
+//! Embedded rather than shipped as files: each names this binary as what root
+//! executes, so a file on disk is a second place that instruction could be
+//! rewritten. The list below *is* the installer's list, so a unit cannot exist
+//! in the tree and be silently left out.
 
 use std::path::Path;
 

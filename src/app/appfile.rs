@@ -1,19 +1,10 @@
 //! Writes to an app's `.app` metadata, performed while still root.
 //!
-//! The `.app` file is the only thing in the state directory that says *what to
-//! execute* — `cwd`, `entry`, `type`. Everything else there (`.pid`, `.meta`,
-//! `.enabled`) is observable state: tampering with it confuses the panel, but
-//! does not change what runs.
-//!
-//! That difference is why these writes happen here, in the root prelude, and
-//! the file is left owned by root. An app that shares its account's uid could
-//! otherwise write a `.app` of its own and have the panel launch it — not a
-//! privilege escalation, since it runs as that same account, but a way to make
-//! the panel act on the app's behalf, and to sabotage a neighbour.
-//!
-//! Namespace isolation already closes this for accounts that enable it: the
-//! state directory is not in the app's mount namespace at all. This covers the
-//! shared mode too.
+//! The `.app` is the only state that says *what to execute*; everything else
+//! under `.run` is observable state the account may write. So it is written
+//! here and left owned by root: an app shares its account's uid and could
+//! otherwise forge one and have the panel launch it — not an escalation, but a
+//! way to sabotage a neighbour.
 
 use std::path::{Path, PathBuf};
 

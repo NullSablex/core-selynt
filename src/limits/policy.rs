@@ -1,17 +1,10 @@
-//! Memory allocation policy: how much each app may use, and how much the
-//! account's apps may use together.
+//! How much memory each app may use, and how much the account's apps may use
+//! together.
 //!
-//! Three layers, all enforced by the kernel:
-//!
-//! * the account's **slice** caps every app together — nothing escapes it;
-//! * each app's **`MemoryMin`** guarantees it enough to run;
-//! * each app's **`MemoryHigh`/`MemoryMax`** let it grow into spare capacity.
-//!
-//! The per-app maxima deliberately add up to more than the slice allows. That
-//! overcommit is what makes usage elastic: one app alone reaches most of the
-//! pool, and when others start competing the kernel reclaims from whoever went
-//! past their share. Handing out a fixed, equal slice instead — the previous
-//! model — reserved memory nobody was using and refused momentary peaks.
+//! The per-app maxima deliberately add up to more than the account's slice
+//! allows. That overcommit is what makes usage elastic: one app alone reaches
+//! most of the pool, and the kernel reclaims from whoever overran once others
+//! compete. A fixed equal share instead reserved memory nobody was using.
 
 use std::path::Path;
 

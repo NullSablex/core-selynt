@@ -1,16 +1,10 @@
-//! Wires the panel into OpenLiteSpeed and DirectAdmin.
+//! Wires the panel into OpenLiteSpeed and DirectAdmin: the vhost templates
+//! carry the proxy blocks, and the web server's user is recorded so the socket
+//! ACL can name it.
 //!
-//! Two things have to be in place for an app to receive traffic:
-//!
-//! - DirectAdmin's vhost templates carry the proxy blocks, so every generated
-//!   vhost knows how to reach an app's socket.
-//! - The web server's user is recorded, since the socket is reached through a
-//!   POSIX ACL granted to it and nothing else.
-//!
-//! Done here rather than in a shell script for the same reason as the rest:
-//! this runs as root at install time, and it edits the templates every
-//! customer's vhost is generated from. A file root executes is a file whose
-//! contents become root execution.
+//! In the binary rather than a shell script because it runs as root and edits
+//! the templates every customer's vhost comes from — a file root executes is a
+//! file whose contents become root execution.
 
 use std::path::{Path, PathBuf};
 

@@ -1,22 +1,10 @@
 //! Who the caller is, and what they are allowed to act on.
 //!
-//! This binary is setuid root, so the process is root regardless of who ran it.
-//! Authority therefore comes from the **real** uid — which the kernel preserves
-//! across the setuid — and from DirectAdmin's own account database. The
-//! `USERNAME` environment variable is supplied by the caller and is never
-//! trusted on its own.
-//!
-//! Three levels, matching what each command actually needs:
-//!
-//! 1. **any account** — acts only on its own apps;
-//! 2. **service accounts and DirectAdmin admins/resellers**
-//!    ([`caller_is_privileged`]) — may act on behalf of an account, because the
-//!    panel's CGI runs as one of them;
-//! 3. **real root** ([`caller_is_root`]) — installing and removing the plugin.
-//!
-//! Matching account *names* against a list was tried and abandoned: the admin
-//! account can be renamed and there can be many resellers, so the `usertype=`
-//! field in DirectAdmin's database is the authority instead.
+//! The binary is setuid root, so the process is root regardless of who ran it.
+//! Authority comes from the **real** uid, preserved across the setuid, and from
+//! DirectAdmin's account database — never from `USERNAME`, which the caller
+//! supplies. Three levels: any account acts on its own apps,
+//! [`caller_is_privileged`] acts on behalf of one, [`caller_is_root`] installs.
 
 use std::ptr;
 
@@ -116,15 +104,10 @@ fn da_user_conf(username: &str) -> String {
 }
 
 /// Reads `usertype=` for a DirectAdmin account: `admin`, `reseller` or `user`.
-/// `None` when there is no such account or the file cannot be read.
 ///
-/// This lives under `data/users/`, which is `diradmin`-owned and `0700`, so it
-/// is only readable in the root prelude — exactly where authorisation is
-/// decided, and out of reach of the caller.
-///
-/// The name is interpolated into a path, so it is validated first. It comes
-/// from `getpwuid()` rather than the caller, but this decides authorisation and
-/// the check is nearly free.
+/// Lives under `data/users/`, which is `diradmin`-owned and `0700`, so it is
+/// readable only while still root — where authorisation is decided. The name is
+/// interpolated into a path and validated first.
 fn da_usertype(username: &str) -> Option<String> {
     if !validate_name(username) {
         return None;
@@ -144,36 +127,22 @@ fn usertype_is_privileged(usertype: Option<&str>) -> bool {
     matches!(usertype, Some("admin" | "reseller"))
 }
 
-/// True when the caller may act on other accounts and run `admin` commands.
+/// Whether the caller may install, reconfigure or remove the plugin.
 ///
-/// DirectAdmin executes plugin CGI **as the logged-in account** — `admin` on a
-/// default install, but the name is arbitrary and there can be several
-/// resellers. Matching account *names* against a list was therefore always
-/// going to break on someone's server; authority comes from the account's
-/// `usertype=` in DirectAdmin's own database instead:
-///
-///   * `root` — installer, cron and shell use;
-///   * a DA account whose `usertype` is `admin` or `reseller`;
-///   * the service accounts in [`SERVICE_ACCOUNT_FILES`], for the paths where
-///     DA runs as a worker rather than as the user.
-///
-/// A plain `user` account is never privileged, so a customer cannot reach
-/// another customer's apps even though the CGI runs under their own uid.
-/// Whether the caller may install, reconfigure or remove the plugin itself.
-///
-/// Stricter than [`caller_is_privileged`] on purpose. The web server and
-/// DirectAdmin's CGI account are trusted to act *on behalf of* an account —
-/// that is what serving the panel requires — but not to take the panel apart.
-/// Anything reaching one of those accounts, a compromised CGI endpoint for
-/// instance, could otherwise stop every app on the server and strip the
-/// configuration.
-///
-/// Installation is a decision an administrator makes at a shell, so it asks for
-/// the identity a shell has.
+/// Stricter than [`caller_is_privileged`]: the web server and DirectAdmin's CGI
+/// account act *on behalf of* an account, but must not be able to take the
+/// panel apart — a compromised CGI endpoint would otherwise stop every app on
+/// the server.
 pub(crate) fn caller_is_root() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
+/// Whether the caller may act on other accounts and run `admin` commands.
+///
+/// Authority comes from `usertype=` in DirectAdmin's database, not from a list
+/// of names: the admin account can be renamed and there can be many resellers.
+/// Root, an `admin`/`reseller` account, and the service accounts in
+/// [`SERVICE_ACCOUNT_FILES`] qualify; a plain `user` never does.
 pub(crate) fn caller_is_privileged() -> bool {
     let caller_uid = unsafe { libc::getuid() };
     if caller_uid == 0 {
@@ -196,17 +165,13 @@ pub(crate) fn caller_is_privileged() -> bool {
         })
 }
 
-/// Resolves the user this invocation is allowed to act on, as
+/// Resolves the account this invocation may act on, as
 /// `(uid, gid, home, username)`.
 ///
-/// This binary is setuid root and world-executable, so `USERNAME` — a value the
-/// caller supplies — cannot be trusted by itself. Taking it at face value let
-/// any local account run `USERNAME=victim core-selynt ...` and drive the tool
-/// over someone else's apps and state with root behind it.
-///
-/// Authority comes from the real uid instead (see [`caller_is_privileged`]):
-/// privileged callers may name any account, everyone else acts only as
-/// themselves.
+/// `USERNAME` comes from the caller, so taking it at face value let any local
+/// account run `USERNAME=victim core-selynt ...` with root behind it. Authority
+/// comes from the real uid instead: privileged callers may name any account,
+/// everyone else acts only as themselves.
 pub(crate) fn resolve_target_user() -> Result<(u32, u32, String, String)> {
     let caller_uid = unsafe { libc::getuid() };
     let caller = lookup_uid(caller_uid);

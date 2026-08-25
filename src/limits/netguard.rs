@@ -1,14 +1,11 @@
-//! Enforces the no-external-port rule for apps that are already running.
+//! Stops apps that bind a port reachable from off the host.
 //!
-//! `cmd_start` checks this once, while the app is starting. That is not enough:
-//! the `node-loader` hook it relies on only covers the app's own process, so a
-//! child spawned without it — or any app that is not Node — can bind a port at
-//! any moment afterwards. This sweep closes that window by looking at every
-//! process in the app's cgroup, whenever it is invoked.
+//! `cmd_start` checks this once, but the `node-loader` hook it relies on covers
+//! only the app's own process — a child spawned without it, or any non-Node
+//! app, can bind a port later. This sweep walks every process in the app's
+//! cgroup instead.
 //!
-//! Loopback is deliberately allowed. An app talking to itself (a local cache,
-//! IPC between its own workers) harms nobody; what the panel forbids is a port
-//! reachable from off the host, which bypasses its proxy entirely.
+//! Loopback is allowed: an app talking to itself bypasses nothing.
 
 use std::path::Path;
 use std::time::{Duration, Instant};

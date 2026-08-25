@@ -45,17 +45,10 @@ const NETWORK_PORT_FORBIDDEN_MSG: &str =
 
 /// Whether the app has bound a port reachable from off the host.
 ///
-/// Two things this must get right, both learned from the netguard sweep:
-///
-/// * **Loopback is allowed.** An app talking to itself — a local cache, IPC
-///   between its own workers — harms nobody; only a port that bypasses the
-///   proxy is forbidden. Checking every bind instead refused apps at start that
-///   the sweep would then happily leave running: the two halves of one policy
-///   disagreeing.
-/// * **The whole cgroup counts, not just the main process.** A child spawned
-///   without the Node loader can bind anything, which is exactly why the sweep
-///   walks the cgroup. Looking only at the app's own pid let that child through
-///   until the next sweep noticed it.
+/// Two things learned from the netguard sweep, which enforces the same rule:
+/// loopback is allowed (an app talking to itself bypasses nothing), and the
+/// whole cgroup counts — a child spawned without the Node loader can bind
+/// anything, so checking only the app's own pid let it through.
 fn app_has_external_port(username: &str, name: &str, pid: u32) -> bool {
     let pids = match crate::limits::usage::scope_pids(username, name) {
         // No cgroup (systemd unavailable, or the scope is not up yet): the
@@ -371,19 +364,11 @@ fn scope_unit_name(username: &str, name: &str) -> String {
 
 /// Wraps `cmd` in `systemd-run --scope` so the app lands in a cgroup of its own.
 ///
-/// Without this an app inherits the cgroup of whatever started it — the CGI
-/// process, or the `boot-recover` unit. systemd then tears the app down along
-/// with that transient cgroup, which is why apps restored at boot died moments
-/// later, and why an app started from a login session was at the mercy of
-/// `KillUserProcesses`. Its own scope makes the app independent of its parent.
-///
-/// Registering a scope on the system bus is a privileged operation, so this has
-/// to run before the privilege drop; `--uid`/`--gid` hand the drop to systemd,
-/// which applies it to the app itself. Supplementary groups come from
-/// `initgroups` inside systemd, matching what `drop_privileges` would have done.
-///
-/// `--collect` drops the unit once it exits, so a crashed app leaves no failed
-/// unit behind blocking the next start under the same name.
+/// Without it the app inherits the cgroup of whatever started it and systemd
+/// tears it down along with that — which is why apps restored at boot used to
+/// die moments later. Registering a scope needs the system bus, so this runs
+/// before the drop and lets `--uid`/`--gid` perform it. `--collect` clears the
+/// unit on exit, so a crash leaves nothing blocking the next start.
 fn wrap_in_scope(
     cmd: Command,
     username: &str,

@@ -304,15 +304,10 @@ pub(crate) fn app_limits_for_with(
 
 /// Pushes the resolved memory cap onto every *running* app of an account.
 ///
-/// Caps have to be re-resolved whenever any app's setting changes: pinning one
-/// app shrinks what the auto apps may take. Waiting for the next start would
-/// leave the running apps on their old, larger limits, so for a while the caps
-/// would add up to more than the account owns — precisely the overcommit the
-/// limits exist to prevent.
-///
-/// `systemctl set-property --runtime` applies to a live scope, so the new
-/// ceiling takes effect at once. `--runtime` keeps it out of /etc: the scope is
-/// transient and the source of truth is the `.app` file.
+/// Pinning one app shrinks what the others may take, so the caps are
+/// re-resolved on every change; waiting for the next start would leave them
+/// adding up to more than the account owns. `--runtime` applies to the live
+/// scope and keeps it out of /etc — the `.app` file is the source of truth.
 pub(crate) fn reapply_app_limits(state_dir: &Path, username: &str) {
     reapply_app_limits_with(state_dir, username, "", "");
 }

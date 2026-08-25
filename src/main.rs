@@ -295,22 +295,10 @@ fn main() {
     // the picture entirely — there is no account to name, and demanding one
     // would be asking for a value the answer does not depend on.
     if let Some(command) = server_wide_command(&cli.command) {
-        // Three levels, not two.
-        //
-        // `SyncProxy` is how an ordinary command tells the panel that the
-        // routing no longer matches the live apps, and it is invoked by the
-        // panel itself after the privilege drop. It reads only state the panel
-        // wrote and rewrites a file derived entirely from it, so any account may
-        // ask for it.
-        //
-        // `Setup` and `Teardown` change the installation itself — they stop
-        // every app, rewrite DirectAdmin's templates and reconfigure the web
-        // server. The web server's own account is trusted to act on behalf of a
-        // customer, which is what serving the panel needs, but not to take the
-        // panel apart: otherwise anything that reached that account could
-        // uninstall it.
-        //
-        // The rest is server-wide maintenance the panel triggers for itself.
+        // Three levels, not two. `SyncProxy` only rewrites a file derived from
+        // state the panel itself wrote, so any account may ask for it. `Setup`
+        // and `Teardown` change the installation — the web server's account is
+        // trusted to act for a customer, not to uninstall the panel.
         let allowed = match command {
             ServerWide::SyncProxy => true,
             ServerWide::Setup | ServerWide::Teardown => sys::auth::caller_is_root(),

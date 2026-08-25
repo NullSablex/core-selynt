@@ -1,13 +1,9 @@
-//! Walking the plugin tree, and the permissions each file in it should have.
+//! Walking the plugin tree, and the permissions each file should have.
 //!
 //! Shared by the installer, which *applies* these modes, and the diagnostic,
-//! which *verifies* them. Two copies of this rule would drift, and a drift here
-//! is invisible: the diagnostic would pass on a tree the installer never
-//! produces, or flag one it just wrote correctly.
-//!
-//! Neither walk follows symlinks. A link inside the tree could point anywhere,
-//! and both callers act on what they find — the installer by changing
-//! permissions, which through a symlink would land on the target instead.
+//! which *verifies* them — two copies would drift, and the drift is invisible.
+//! Neither walk follows symlinks: a link could point anywhere, and both callers
+//! act on what they find.
 
 use std::path::Path;
 

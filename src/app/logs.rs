@@ -1,13 +1,9 @@
 //! Reading and trimming an application's log files.
 //!
-//! The panel shows what an app is saying now, so these files are truncated at
-//! every start and rotated once they grow past the cap. Reading is done from
-//! the end: a log can be far larger than the handful of lines the interface
-//! asks for, and loading all of it to show the last twenty would be paid for on
-//! every page load.
-//!
-//! Escape sequences are stripped because the output lands in HTML. A log is
-//! written by the customer's own process, so it is untrusted input.
+//! Truncated at every start, so the panel shows what the app is saying now, and
+//! read from the end — a log can be far larger than the few lines the interface
+//! asks for. Escape sequences are stripped: the output lands in HTML and the
+//! log is written by the customer's own process.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

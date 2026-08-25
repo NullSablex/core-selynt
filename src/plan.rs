@@ -1,25 +1,12 @@
 //! Turning a parsed command into the work it takes, on both sides of the
 //! privilege drop.
 //!
-//! The binary runs setuid root. Some work only root can do — reading
-//! DirectAdmin's account database, writing a root-owned `.app`, registering a
-//! systemd scope — and the rest must not be root at all. Between them sits
-//! `drop_privileges`, and it happens exactly once.
-//!
-//! Each command is one arm of [`plan`]. The arm's body runs as root; the
-//! closure it returns runs as the account. Both halves of a command are
-//! therefore written together, and the compiler enforces two things that used
-//! to be left to whoever remembered:
-//!
-//! * a command cannot be given root work without also saying what to do after
-//!   the drop — the arm has to return a closure either way;
-//! * a new command cannot be added without deciding both — the match is
-//!   exhaustive, so leaving one out fails to compile.
-//!
-//! Values pass from one half to the other as ordinary locals captured by the
-//! closure, which is what removed the `Option` per command and the "result
-//! missing" checks that went with them: there is no longer a way to reach the
-//! second half without the first having produced its value.
+//! Each command is one arm of [`plan`]: the arm's body runs as root, the
+//! closure it returns runs as the account, and `drop_privileges` sits between
+//! them. Writing both halves together is what lets the compiler enforce what
+//! used to be left to memory — the match is exhaustive, so a command cannot be
+//! added without deciding both sides, and values pass between them as captured
+//! locals rather than as an `Option` that might be `None`.
 
 use std::path::{Path, PathBuf};
 
@@ -321,16 +308,11 @@ fn spawn_for(
 mod tests {
     /// `Start` and `Restart` must both reach `spawn_for`.
     ///
-    /// `Restart` once did not: it read no account limits and never spawned into
-    /// a scope, so the app came back up outside systemd — no cgroup of its own,
-    /// escaping the account's memory cap and invisible to the netguard sweep,
-    /// which finds processes by walking cgroups. Nothing pointed at the missing
-    /// step because the two commands were written far apart.
-    ///
-    /// Reading the source is the check here: both arms are in one `match`, and
-    /// what makes them agree is that each names `spawn_for`. A future arm that
-    /// launches an app without it would compile and run, and the app would be
-    /// uncontained — exactly the old bug.
+    /// `Restart` once did not, and the app came back up outside systemd — no
+    /// cgroup, escaping the account cap and invisible to the netguard sweep.
+    /// The check reads the source because what makes the two arms agree is that
+    /// each names `spawn_for`; an arm launching an app without it would compile
+    /// and leave the app uncontained.
     #[test]
     fn start_and_restart_both_spawn_into_a_scope() {
         let src = include_str!("plan.rs");

@@ -82,18 +82,13 @@ fn try_setfacl(
         && setfacl(marker_path, &read_only)
 }
 
-/// `chmod` fallback when `setfacl` is unavailable.
+/// `chmod` fallback when `setfacl` is unavailable — weaker, and deliberately
+/// noisy about it.
 ///
-/// **This is weaker than the ACL path and deliberately noisy about it.** An ACL
-/// names the web user: `u:apache:--x` lets exactly one account traverse. A mode
-/// bit cannot name anyone, so `711` grants traverse to *every* account on the
-/// server — the per-account boundary the state dir exists to draw. The socket
-/// stays `600` and the marker `604`, so a neighbour still cannot read or write
-/// an app's socket; what it loses is the directory-level opacity.
-///
-/// Reached only when `setfacl` is missing or fails. On a supported host the ACL
-/// path always wins, which is why this is a warning rather than a refusal:
-/// leaving every app unreachable would be worse than a wider traverse bit.
+/// An ACL names one account; a mode bit cannot, so `711` grants traverse to
+/// *every* account on the server. The socket stays `600`, so a neighbour still
+/// cannot read it; what is lost is the directory-level opacity. A warning
+/// rather than a refusal: leaving every app unreachable would be worse.
 fn fallback_chmod(
     state_dir: &Path,
     sockets_dir: &Path,

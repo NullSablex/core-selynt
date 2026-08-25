@@ -1,13 +1,7 @@
 //! Restores apps that were running before the last reboot.
 //!
-//! Invoked by `selynt-panel.service` at boot. An app carries a `.enabled`
-//! marker while it is meant to be running; one the user stopped has none and
-//! stays stopped.
-//!
-//! Implemented here rather than as a shell script for the same reason as the
-//! diagnostic: this binary is setuid root, and a root-run script is a file
-//! whose contents become root execution. Keeping it in the binary means there
-//! is nothing extra on disk to write to.
+//! Invoked by `selynt-panel.service`. An app carries a `.enabled` marker while
+//! it is meant to be running; one the user stopped has none.
 
 use std::path::Path;
 

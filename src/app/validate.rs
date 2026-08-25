@@ -1,16 +1,9 @@
 //! Checks applied before an application is registered.
 //!
-//! These decide what the panel will later execute as the account, so each one
-//! closes a way of pointing it somewhere it should not go:
-//!
-//! * a `cwd` outside the account's home — including one reached through a
-//!   symlink, which `remove --delete-dir` would follow when deleting;
-//! * a value carrying a newline, which would forge extra keys in the
-//!   line-oriented `.app` file;
-//! * an entry file for a compiled runtime that is not actually an executable.
-//!
-//! Kept apart from the commands so the rules can be read as a set, and tested
-//! without going through a command.
+//! These decide what the panel later executes as the account: a `cwd` outside
+//! the home (including through a symlink, which `remove --delete-dir` would
+//! follow), a value with a newline that would forge keys in the `.app` file, or
+//! an entry file that is not executable.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -32,19 +25,12 @@ pub(crate) enum CwdError {
 }
 
 
-/// Where an app's code lives when the caller does not say.
+/// Where an app's code lives when the caller does not say: `<home>/apps/<name>`.
 ///
-/// `<home>/apps/<name>`. The home comes from DirectAdmin, which is what makes
-/// the path pass [`check_cwd_within_home`]; the `apps/` level and the choice of
-/// the app's *name* over its host are the panel's own convention — the name is
-/// the app's identity and cannot change, while a host can be repointed without
-/// the code moving.
-///
-/// An earlier default put this under the state directory
-/// (`/var/lib/selynt_panel/<account>/apps/nodejs/<host>`), which the home check
-/// rejects. Nothing ever created an app there: it made `add` without `--cwd`
-/// fail outright, and the two copies of that expression had to agree for it to
-/// even be reached.
+/// The home comes from DirectAdmin, which is what makes this pass
+/// [`check_cwd_within_home`]. Using the *name* and not the host is deliberate:
+/// the name is the app's identity, while a host can be repointed without the
+/// code moving.
 pub(crate) fn default_cwd(home: &str, name: &str) -> String {
     format!("{home}/apps/{name}")
 }
@@ -120,17 +106,13 @@ pub(super) fn cwd_escapes_home(path: &Path) -> bool {
     !target.starts_with(&home_real)
 }
 
-/// Rejects a `cwd` that escapes the user's home directory.
+/// Rejects a `cwd` that escapes the account's home.
 ///
-/// Two ways out existed. A plain path elsewhere (`/tmp/app`) put the code in a
-/// world-writable place, where any other account could swap the entry file that
-/// then runs as this user. And a symlink under the home pointing outside it was
-/// followed by both `add` (writing `.env` and the entry through it) and by
-/// `remove --delete-dir`, whose `remove_dir_all` deletes the *target's*
-/// contents — a confirmed way to destroy files the app never owned.
-///
-/// So the check resolves symlinks on every existing ancestor and demands the
-/// result stay under `$HOME`.
+/// Two ways out existed: a path somewhere world-writable, where another account
+/// could swap the entry file that then runs as this user, and a symlink under
+/// the home pointing outside it — followed by `add` when writing the entry, and
+/// by `remove --delete-dir`, which deletes the *target's* contents. So the
+/// check resolves symlinks on every existing ancestor.
 fn validate_cwd_within_home(cwd: &str) {
     let home = match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => h,

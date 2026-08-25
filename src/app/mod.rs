@@ -1,16 +1,5 @@
 //! An application's life cycle: registering it, launching it, watching it, and
 //! taking it down.
-//!
-//! * [`commands`] — what each CLI verb does, after privileges have been
-//!   dropped.
-//! * [`start`] — spawning an app and deciding it is actually up. Readiness is
-//!   the socket accepting a connection, not the process existing.
-//! * [`appfile`] — the `.app` metadata, which says *what to execute* and is
-//!   therefore written only as root and left unwritable by the account.
-//! * [`validate`] — the checks applied before an app is registered.
-//! * [`logs`] — reading and trimming what an app writes.
-//! * [`boot`] — bringing back, after a reboot, the apps that were meant to be
-//!   running.
 
 pub(crate) mod appfile;
 pub(crate) mod boot;
@@ -51,15 +40,10 @@ pub(crate) fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
 
 /// Starts one app by invoking the installed binary again, as `username`.
 ///
-/// `cmd_start` does more than spawn — it persists the pid, waits for the socket
-/// and applies the ACL — and it ends the process when done, so it cannot simply
-/// be called in a loop. Running it as a child also keeps one app's failure from
-/// ending a sweep over many.
-///
-/// The installed path is used rather than `/proc/self/exe`: this binary is
-/// setuid root, and that path is the file the installer owns and verifies.
-///
-/// Returns whether the app started.
+/// `cmd_start` ends the process when done, so it cannot be called in a loop;
+/// running it as a child also keeps one app's failure from ending a sweep over
+/// many. The installed path is used rather than `/proc/self/exe` because this
+/// binary is setuid and that path is the one the installer owns.
 pub(crate) fn start_app_detached(username: &str, name: &str) -> bool {
     std::process::Command::new(format!("{}/bin/core-selynt", crate::sys::state::PLUGIN_PATH))
         .arg("start")

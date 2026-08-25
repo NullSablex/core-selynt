@@ -1,16 +1,11 @@
-//! Finding the Node.js runtimes installed on the server — and deciding which of
-//! them are safe to run.
+//! Finding the Node.js runtimes on this server, and deciding which are safe to
+//! run.
 //!
-//! Detection is not a passive scan: reading a runtime's version means
-//! *executing* it, and `save-node-versions` does so from the root prelude. A
-//! binary a customer can write is therefore a binary a customer can have run as
-//! root, which is why every candidate passes two independent checks — it must
-//! resolve inside a trusted root, and the resolved file and each of its parents
-//! must be root-owned and not group/world-writable.
-//!
-//! Split out of the admin module because it has two callers with nothing to do
-//! with the admin pages: the diagnostic reports refused runtimes, and starting
-//! an app validates the interpreter it is about to launch.
+//! Detection is not a passive scan: reading a version means *executing* the
+//! binary, and `save-node-versions` does so as root. A runtime a customer can
+//! write is therefore one they can have run as root, so each candidate must
+//! resolve inside a trusted root *and* be root-owned and unwritable by others,
+//! parents included.
 
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
