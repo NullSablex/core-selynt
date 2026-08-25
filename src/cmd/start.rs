@@ -3,16 +3,18 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+use std::str::FromStr;
 
 use nix::sys::signal::{Signal, kill};
 use serde_json::{Value, json};
 
 use crate::acl::apply_acl;
+use super::runtime::Runtime;
 use crate::output::{debug, success, system_error, user_error};
 use crate::proc::{
     ProcessSnapshot, has_network_listen, is_process_alive, read_proc_snapshot, read_proc_starttime,
 };
-use crate::state::{AppMeta, PLUGIN_PATH, atomic_write, load_app_meta, set_perm};
+use crate::state::{AppMeta, PLUGIN_PATH, atomic_write, load_app_meta, set_perm, socket_path_for};
 
 use super::manage::rotate_log_if_needed;
 use super::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
@@ -69,7 +71,7 @@ pub fn cmd_start(
         success(with_debug(json!({ "pid": pid }), dbg));
     }
 
-    let socket_path = state_dir.join(".sockets").join(&meta.host);
+    let socket_path = socket_path_for(state_dir, &meta);
     let marker_path = state_dir.join(".proxy").join(&meta.host);
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&marker_path);
@@ -81,10 +83,17 @@ pub fn cmd_start(
     // root prelude; fall back to spawning here when that path is unavailable.
     let pid = match spawned_pid {
         Some(p) => p,
-        None => spawn_app(&meta, name, &socket_path, None, None),
+        None => spawn_app(
+            &meta,
+            name,
+            &socket_path,
+            None,
+            None,
+            crate::state::account_is_isolated(state_dir),
+        ),
     };
 
-    if let Err(e) = persist_state(&pid_file, &meta_file, pid) {
+    if let Err(e) = persist_state(&pid_file, &meta_file, pid, &socket_path) {
         let _ = kill(to_nix_pid(pid), Signal::SIGKILL);
         system_error("state_write_failed", &format!("{e:#}"));
     }
@@ -145,7 +154,7 @@ pub fn spawn_into_scope(
     if !systemd_available() {
         return None;
     }
-    let socket_path = state_dir.join(".sockets").join(&meta.host);
+    let socket_path = socket_path_for(state_dir, meta);
     let _ = std::fs::remove_file(&socket_path);
 
     // Resolve the cap here, in the root prelude: it needs the account's
@@ -158,6 +167,7 @@ pub fn spawn_into_scope(
         &socket_path,
         Some((username, uid, gid)),
         limits,
+        crate::state::account_is_isolated(state_dir),
     ))
 }
 
@@ -167,6 +177,7 @@ fn spawn_app(
     socket_path: &Path,
     scope: Option<(&str, u32, u32)>,
     limits: Option<super::memory::AppLimits>,
+    isolated: bool,
 ) -> u32 {
     let cwd_path = PathBuf::from(&meta.cwd);
     let log_out = cwd_path.join("logs").join(format!("{name}.out.log"));
@@ -202,7 +213,43 @@ fn spawn_app(
     let entry_path = cwd_path.join(&meta.entry);
     let socket_str = socket_path.to_string_lossy().to_string();
 
+    // An isolated app's socket sits in a directory of its own, which has to
+    // exist before the sandbox can bind it — and before the app can bind(2).
+    // This runs in the root prelude, so the directory would be left owned by
+    // root and the app could not create its socket in it.
+    if let Some(socket_dir) = socket_path.parent()
+        && !socket_dir.is_dir()
+    {
+        let _ = std::fs::create_dir_all(socket_dir);
+        let _ = set_perm(socket_dir, 0o750);
+        if let Some((_, uid, gid)) = scope {
+            let _ = crate::state::chown_path(socket_dir, uid, gid);
+        }
+    }
+
     let mut cmd = build_command(meta, &entry_path);
+
+    // Isolation goes here, inside the scope wrapper applied below: the app must
+    // stay in its own cgroup so the memory limits and the netguard sweep still
+    // see it. An unavailable sandbox leaves the app running shared rather than
+    // refusing to start it.
+    if isolated
+        && let Some(socket_dir) = socket_path.parent()
+    {
+        if super::sandbox::available() {
+            cmd = super::sandbox::wrap(cmd, &cwd_path, socket_dir);
+        } else {
+            // Isolation was accepted when it was switched on, so losing it here
+            // means the host changed underneath — bubblewrap removed, or user
+            // namespaces disabled. Starting the app shared would silently give
+            // the account less separation than it is being told it has.
+            user_error(
+                "sandbox_unavailable",
+                super::sandbox::unavailable_reason(),
+            );
+        }
+    }
+
     cmd.env("SELYNT_SOCKET", &socket_str);
     cmd.env("SELYNT_HOST", &meta.host);
     for (k, v) in &env_vars {
@@ -234,10 +281,10 @@ fn spawn_app(
         });
     }
 
-    let cmd_display = match meta.app_type.as_str() {
-        "node" => format!("node {}", entry_path.display()),
-        _ => entry_path.display().to_string(),
-    };
+    let cmd_display = Runtime::from_str(&meta.app_type)
+        .map_or_else(|()| entry_path.display().to_string(), |rt| {
+            rt.command_display(&entry_path)
+        });
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => system_error("spawn_failed", &format!("{cmd_display}: {e:#}")),
@@ -263,7 +310,7 @@ fn load_env_file(cwd: &Path) -> Vec<(String, String)> {
 }
 
 fn build_command(meta: &AppMeta, entry_path: &Path) -> Command {
-    if meta.app_type.as_str() == "node" {
+    if Runtime::from_str(&meta.app_type).is_ok_and(Runtime::is_interpreted) {
         let node_bin = if meta.node_version.is_empty() {
             "node".to_string()
         } else {
@@ -370,7 +417,12 @@ fn wrap_in_scope(
     run
 }
 
-fn persist_state(pid_file: &Path, meta_file: &Path, pid: u32) -> anyhow::Result<()> {
+fn persist_state(
+    pid_file: &Path,
+    meta_file: &Path,
+    pid: u32,
+    socket_path: &Path,
+) -> anyhow::Result<()> {
     atomic_write(pid_file, format!("{pid}\n").as_bytes())?;
     set_perm(pid_file, 0o600)?;
 
@@ -382,7 +434,12 @@ fn persist_state(pid_file: &Path, meta_file: &Path, pid: u32) -> anyhow::Result<
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let meta_content = format!("uid={my_uid}\nstarttime={starttime}\nstarted_at={started_at}\n");
+    // Record where the socket actually is. Turning account isolation on or off
+    // moves it, and a running app keeps the path it was started with — stopping
+    // it has to clean up that file, not the one the current setting implies.
+    let socket = socket_path.display();
+    let meta_content =
+        format!("uid={my_uid}\nstarttime={starttime}\nstarted_at={started_at}\nsocket={socket}\n");
 
     if let Err(e) =
         atomic_write(meta_file, meta_content.as_bytes()).and_then(|()| set_perm(meta_file, 0o600))

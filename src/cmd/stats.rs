@@ -24,6 +24,22 @@ fn scope_cgroup(username: &str, name: &str) -> String {
     format!("/sys/fs/cgroup/system.slice/{unit}")
 }
 
+/// Every PID in the app's scope — the app itself plus anything it spawned.
+///
+/// The cgroup is what makes a whole-app check possible: a child process is
+/// still in it, however it was started, so callers do not have to walk the
+/// process tree themselves. Empty when the app is not running.
+pub fn scope_pids(username: &str, name: &str) -> Vec<u32> {
+    let procs = Path::new(&scope_cgroup(username, name)).join("cgroup.procs");
+    let Ok(content) = std::fs::read_to_string(procs) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
 /// Reads a single integer from a cgroup file. `max` (no limit) yields `None`.
 fn read_num(path: &Path) -> Option<u64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
@@ -99,10 +115,16 @@ pub fn read_da_limits(username: &str) -> DaLimits {
 /// Reads a `key=value` field from a DirectAdmin `user.conf`.
 fn da_limit(username: &str, key: &str) -> Option<String> {
     let conf = std::fs::read_to_string(format!("{DA_USERS_BASE}/{username}/user.conf")).ok()?;
+    let prefix = format!("{key}=");
+
+    // Filter before taking, not after: DirectAdmin writes the key with an empty
+    // value when no limit is set, and a later line may carry the real one.
+    // Stopping at the first match found an empty value and concluded there was
+    // no limit at all.
     conf.lines()
-        .find_map(|l| l.trim().strip_prefix(&format!("{key}=")))
+        .filter_map(|l| l.trim().strip_prefix(&prefix))
         .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .find(|v| !v.is_empty())
         .map(ToString::to_string)
 }
 
@@ -216,35 +238,6 @@ pub fn cmd_stats(
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scope_path_matches_the_unit_created_at_start() {
-        assert_eq!(
-            scope_cgroup("bob", "api"),
-            "/sys/fs/cgroup/system.slice/selynt-bob-api.scope"
-        );
-    }
-
-    #[test]
-    fn parses_systemd_memory_suffixes() {
-        assert_eq!(parse_memory_limit("512M"), Some(512 * 1024 * 1024));
-        assert_eq!(parse_memory_limit("2G"), Some(2 * 1024 * 1024 * 1024));
-        assert_eq!(parse_memory_limit("1024"), Some(1024));
-        assert_eq!(parse_memory_limit("infinity"), None);
-        assert_eq!(parse_memory_limit(""), None);
-    }
-
-    #[test]
-    fn parses_cpu_quota_with_and_without_sign() {
-        assert_eq!(parse_cpu_quota("50%"), Some(50));
-        // Above 100% means more than a single core.
-        assert_eq!(parse_cpu_quota("150%"), Some(150));
-        assert_eq!(parse_cpu_quota("bogus"), None);
-    }
-}
 
 /// True when the app's systemd scope exists — i.e. the app is running.
 fn scope_is_live(username: &str, name: &str) -> bool {
@@ -397,3 +390,60 @@ pub fn ensure_slice_cap(username: &str, cap: Option<u64>) {
         .status();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_path_matches_the_unit_created_at_start() {
+        assert_eq!(
+            scope_cgroup("bob", "api"),
+            "/sys/fs/cgroup/system.slice/selynt-bob-api.scope"
+        );
+    }
+
+    #[test]
+    fn parses_systemd_memory_suffixes() {
+        assert_eq!(parse_memory_limit("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("2G"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("1024"), Some(1024));
+        assert_eq!(parse_memory_limit("infinity"), None);
+        assert_eq!(parse_memory_limit(""), None);
+    }
+
+    #[test]
+    fn parses_cpu_quota_with_and_without_sign() {
+        assert_eq!(parse_cpu_quota("50%"), Some(50));
+        // Above 100% means more than a single core.
+        assert_eq!(parse_cpu_quota("150%"), Some(150));
+        assert_eq!(parse_cpu_quota("bogus"), None);
+    }
+}
+
+#[cfg(test)]
+mod da_limit_tests {
+    /// DirectAdmin writes the key with no value when the account has no limit,
+    /// and can carry a second line with the real one. Taking the first match
+    /// found the empty one and reported "no limit".
+    #[test]
+    fn an_empty_key_does_not_hide_a_later_value() {
+        let conf = "wordpress=ON\nMemoryMax=\nzoom=100\nMemoryMax=1G\n";
+        let found = conf
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("MemoryMax="))
+            .map(str::trim)
+            .find(|v| !v.is_empty());
+        assert_eq!(found, Some("1G"));
+    }
+
+    #[test]
+    fn no_value_anywhere_means_no_limit() {
+        let conf = "wordpress=ON\nMemoryMax=\n";
+        let found = conf
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("MemoryMax="))
+            .map(str::trim)
+            .find(|v| !v.is_empty());
+        assert_eq!(found, None);
+    }
+}

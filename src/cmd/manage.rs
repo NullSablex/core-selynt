@@ -1,12 +1,14 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde_json::{Value, json};
 
 use crate::output::{success, system_error, user_error};
-use crate::state::{atomic_write, list_app_names, load_app_meta, set_perm, validate_name};
+use crate::state::{AppMeta, atomic_write, list_app_names, load_app_meta, set_perm, validate_name};
 
+use super::runtime::Runtime;
 use super::{get_status, signal_sync, stop_internal, validate_safe_component, with_debug};
 
 const LOG_TAIL_CHUNK: u64 = 8192;
@@ -118,9 +120,9 @@ pub fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
 
     validate_add_args(args, cwd);
 
-    let app_file = state_dir.join(".run").join(format!("{}.app", args.name));
-    create_app_file(&app_file, args.name);
-    write_app_metadata(&app_file, args, cwd);
+    // The `.app` file was already written by the root prelude, which owns it:
+    // it is the only piece of state that says what to execute, so the account
+    // must not be able to forge one. See `cmd::appfile`.
 
     let cwd_path = PathBuf::from(cwd);
     if let Err(e) = std::fs::create_dir_all(&cwd_path) {
@@ -134,13 +136,128 @@ pub fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
         write_env_file(&cwd_path, args.env_vars);
     }
 
-    if args.app_type == "rust" {
-        validate_rust_entry(&cwd_path.join(args.entry));
-    } else if args.app_type == "node" {
-        scaffold_node_entry(&cwd_path.join(args.entry), args.name);
+    // Unknown types are rejected before reaching here (clap parses them into
+    // AppType), so an unparseable value means metadata written by hand.
+    if let Ok(rt) = Runtime::from_str(args.app_type) {
+        let entry_path = cwd_path.join(args.entry);
+        if rt.scaffolds_entry() {
+            scaffold_node_entry(&entry_path, args.name);
+        }
+        if rt.requires_executable_entry() {
+            validate_rust_entry(&entry_path);
+        }
     }
 
     success(with_debug(json!({}), dbg))
+}
+
+
+/// Reports whether this account isolates its apps, and which are running.
+pub fn cmd_status_isolated(state_dir: &Path, dbg: Option<&Value>) -> ! {
+    // `supported` is separate from `isolated` on purpose: the first says
+    // whether this host can isolate at all, the second whether the account
+    // asked for it. Reporting only the preference would let the panel claim
+    // isolation on a host that cannot provide it.
+    let supported = super::sandbox::available();
+
+    success(with_debug(
+        json!({
+            "isolated": crate::state::account_is_isolated(state_dir),
+            "supported": supported,
+            "reason": (!supported).then(super::sandbox::unavailable_reason),
+            "running": running_app_names(state_dir),
+        }),
+        dbg,
+    ))
+}
+
+/// Turns isolation on or off for the whole account.
+///
+/// It is deliberately not per-app: a namespace confines what the process inside
+/// it sees, but does not change its uid, so one non-isolated app could still
+/// read an isolated sibling's files and signal its processes. Isolation only
+/// means anything when it covers every app of the account.
+/// Switches the account's isolation mode and restarts its running apps.
+///
+/// Runs as root, in the prelude. Isolation is decided when an app is launched
+/// and it moves the app's socket, so a running app keeps its old mode until it
+/// is restarted — leaving that to the user would make the setting look like it
+/// had no effect. Recreating each systemd scope is privileged work, which is
+/// why this cannot happen after the drop.
+///
+/// Returns the apps that were restarted.
+pub fn switch_isolation(
+    state_dir: &Path,
+    username: &str,
+    isolated: bool,
+) -> Result<Vec<String>, (String, String)> {
+    // Refuse rather than accept a setting this host cannot honour. Storing it
+    // anyway would leave the panel reporting isolation that is not in effect,
+    // which is worse than not offering it: the account would believe its apps
+    // are separated while they still share everything.
+    if isolated && !super::sandbox::available() {
+        return Err((
+            "sandbox_unavailable".into(),
+            super::sandbox::unavailable_reason().to_string(),
+        ));
+    }
+
+    let flag = state_dir.join("isolated");
+    let value = if isolated { "1\n" } else { "0\n" };
+    atomic_write(&flag, value.as_bytes())
+        .and_then(|()| set_perm(&flag, 0o644))
+        .map_err(|e| ("write_failed".to_string(), format!("{e:#}")))?;
+
+    // `admin_get_status`, not `get_status`: the latter requires the process uid
+    // to match the caller's, and this runs as root, where it never does.
+    let run = state_dir.join(".run");
+    let running: Vec<String> = list_app_names(state_dir)
+        .into_iter()
+        .filter(|n| {
+            super::admin_get_status(
+                &run.join(format!("{n}.pid")),
+                &run.join(format!("{n}.meta")),
+            )
+            .0 == "RUNNING"
+        })
+        .collect();
+
+    let mut restarted = Vec::new();
+    for name in running {
+        let Ok(meta) = load_app_meta(state_dir, &name) else {
+            continue;
+        };
+        super::netguard::stop_app_tree(state_dir, &name, &meta);
+
+        if super::start_app_detached(username, &name) {
+            restarted.push(name);
+        }
+    }
+
+    Ok(restarted)
+}
+
+/// Names of the account's apps that are currently running.
+pub fn running_app_names(state_dir: &Path) -> Vec<String> {
+    list_app_names(state_dir)
+        .into_iter()
+        .filter(|n| get_status(state_dir, n).0 == "RUNNING")
+        .collect()
+}
+
+/// Reports the new isolation mode and which apps were restarted to apply it.
+///
+/// The switch itself — writing the flag and restarting the apps — happens in
+/// the root prelude: applying it means recreating each app's systemd scope,
+/// which needs privileges this side of the drop no longer has.
+pub fn cmd_set_isolated(isolated: bool, restarted: Vec<String>, dbg: Option<&Value>) -> ! {
+    success(with_debug(
+        json!({
+            "isolated": isolated,
+            "restarted": restarted,
+        }),
+        dbg,
+    ))
 }
 
 pub fn cmd_set_node_version(
@@ -159,33 +276,7 @@ pub fn cmd_set_node_version(
         );
     }
 
-    let app_file = state_dir.join(".run").join(format!("{name}.app"));
-    let Ok(current) = std::fs::read_to_string(&app_file) else {
-        system_error("read_failed", &format!("read {}", app_file.display()));
-    };
-
-    let mut found = false;
-    let mut new_content = String::with_capacity(current.len() + node_version.len());
-    for line in current.lines() {
-        if let Some((k, _)) = line.split_once('=')
-            && k.trim() == "node_version"
-        {
-            new_content.push_str(&format!("node_version={node_version}\n"));
-            found = true;
-        } else {
-            new_content.push_str(line);
-            new_content.push('\n');
-        }
-    }
-    if !found {
-        new_content.push_str(&format!("node_version={node_version}\n"));
-    }
-
-    if let Err(e) =
-        atomic_write(&app_file, new_content.as_bytes()).and_then(|()| set_perm(&app_file, 0o600))
-    {
-        system_error("write_failed", &format!("{e:#}"));
-    }
+    // Written by the root prelude — the account cannot modify `.app` itself.
 
     // The running process keeps the old runtime until it is restarted.
     let (status, _, _) = get_status(state_dir, name);
@@ -253,23 +344,39 @@ pub fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, dbg: Opt
     ))
 }
 
-pub fn cmd_remove(state_dir: &Path, name: &str, delete_dir: bool, dbg: Option<&Value>) -> ! {
-    let Ok(meta) = load_app_meta(state_dir, name) else {
+pub fn cmd_remove(
+    state_dir: &Path,
+    name: &str,
+    delete_dir: bool,
+    meta: Option<AppMeta>,
+    dbg: Option<&Value>,
+) -> ! {
+    // The prelude removed the root-owned `.app` and handed the metadata over,
+    // since the account cannot delete that file itself.
+    let Some(meta) = meta else {
         user_error("app_not_found", &format!("app '{name}' not found"));
     };
 
     stop_internal(state_dir, name, &meta, 10);
 
+    // Defensive — `stop_internal` already removed the socket, but on failure the
+    // app still has to disappear from disk. Read while `.meta` is still around,
+    // since that is what records where the socket really is.
+    let active_socket = crate::state::active_socket_path(state_dir, &meta);
+
     let run_dir = state_dir.join(".run");
-    for ext in &["app", "pid", "meta", "enabled"] {
+    for ext in &["pid", "meta", "enabled"] {
         let _ = std::fs::remove_file(run_dir.join(format!("{name}.{ext}")));
     }
 
     let cwd_path = PathBuf::from(&meta.cwd);
 
-    // Defensive — `stop_internal` already removes these, but on failure we
-    // still want the app to disappear from disk.
-    let _ = std::fs::remove_file(state_dir.join(".sockets").join(&meta.host));
+    let _ = std::fs::remove_file(&active_socket);
+    // The configured path too: it differs from the active one when the account
+    // switched isolation mode while the app was down, and neither may be left
+    // behind.
+    let _ = std::fs::remove_file(crate::state::socket_path_for(state_dir, &meta));
+    let _ = std::fs::remove_dir(state_dir.join(".sockets").join(name));
     let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
 
     if delete_dir {
@@ -590,49 +697,7 @@ fn validate_meta_value(value: &str) -> bool {
     !value.contains('\n') && !value.contains('\r') && !value.contains('\0')
 }
 
-/// Creates the `.app` file with `create_new` so a concurrent caller cannot win
-/// a TOCTOU race against the existence check + write.
-fn create_app_file(app_file: &Path, name: &str) {
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(app_file)
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            user_error("app_exists", &format!("app '{name}' already exists"));
-        }
-        Err(e) => {
-            system_error(
-                "write_failed",
-                &format!("create {}: {e:#}", app_file.display()),
-            );
-        }
-    }
-}
 
-fn write_app_metadata(app_file: &Path, args: &AddArgs<'_>, cwd: &str) {
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let content = format!(
-        "type={t}\ncwd={cwd}\nentry={entry}\nhost={host}\ndomain={d}\nsubdomain={s}\nnode_version={nv}\ncreated_at={created_at}\n",
-        t = args.app_type,
-        entry = args.entry,
-        host = args.host,
-        d = args.domain.unwrap_or(""),
-        s = args.subdomain.unwrap_or(""),
-        nv = args.node_version.unwrap_or(""),
-    );
-
-    if let Err(e) =
-        atomic_write(app_file, content.as_bytes()).and_then(|()| set_perm(app_file, 0o600))
-    {
-        system_error("write_failed", &format!("{e:#}"));
-    }
-}
 
 fn write_env_file(cwd_path: &Path, env_vars: &[String]) {
     let env_file = cwd_path.join(".env");
