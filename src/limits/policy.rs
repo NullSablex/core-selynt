@@ -46,10 +46,7 @@ pub(crate) fn slice_unit_name(username: &str) -> String {
 
 /// cgroup path of the account's slice.
 pub(crate) fn slice_cgroup(username: &str) -> String {
-    format!(
-        "/sys/fs/cgroup/selynt.slice/{}",
-        slice_unit_name(username)
-    )
+    format!("/sys/fs/cgroup/selynt.slice/{}", slice_unit_name(username))
 }
 
 /// Resolves one app's limits.

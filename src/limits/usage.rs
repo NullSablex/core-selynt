@@ -248,7 +248,6 @@ pub(crate) fn cmd_stats(
     ))
 }
 
-
 /// True when the app's systemd scope exists — i.e. the app is running.
 fn scope_is_live(username: &str, name: &str) -> bool {
     Path::new(&scope_cgroup(username, name)).is_dir()
@@ -310,7 +309,6 @@ pub(crate) fn app_limits_for_with(
         meta.memory_max,
     ))
 }
-
 
 /// Pushes the resolved memory cap onto every *running* app of an account.
 ///

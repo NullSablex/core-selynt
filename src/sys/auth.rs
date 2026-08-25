@@ -18,8 +18,7 @@ const GETPWNAM_BUF_SIZE: usize = 4096;
 /// Files under the plugin's `etc/` naming the accounts DirectAdmin and the web
 /// server run as. Written at install time by probing the running system, so a
 /// renamed account still resolves.
-const SERVICE_ACCOUNT_FILES: [&str; 3] =
-    ["etc/da_user", "etc/da_cgi_user", "etc/ols_web_user"];
+const SERVICE_ACCOUNT_FILES: [&str; 3] = ["etc/da_user", "etc/da_cgi_user", "etc/ols_web_user"];
 
 /// Looks up an account by name, returning `(uid, gid, home)`.
 /// uid and gid of a system account, when it exists.
@@ -253,7 +252,10 @@ mod tests {
 
     #[test]
     fn parses_usertype_with_surrounding_space() {
-        assert_eq!(parse_usertype("  usertype=reseller  \n").as_deref(), Some("reseller"));
+        assert_eq!(
+            parse_usertype("  usertype=reseller  \n").as_deref(),
+            Some("reseller")
+        );
     }
 
     #[test]

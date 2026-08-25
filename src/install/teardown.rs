@@ -73,7 +73,10 @@ fn strip_block(path: &Path) -> Option<&'static str> {
         match crate::sys::fs::atomic_write(path, kept.as_bytes()) {
             Ok(()) => Some("stripped"),
             Err(e) => {
-                crate::sys::output::debug(format!("teardown: {} not stripped: {e:#}", path.display()));
+                crate::sys::output::debug(format!(
+                    "teardown: {} not stripped: {e:#}",
+                    path.display()
+                ));
                 Some("strip_failed")
             }
         }

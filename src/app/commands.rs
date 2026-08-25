@@ -3,17 +3,17 @@ use std::str::FromStr;
 
 use serde_json::{Value, json};
 
+use crate::sys::fs::{atomic_write, set_perm};
 use crate::sys::output::{success, user_error};
 use crate::sys::state::{AppMeta, list_app_names, load_app_meta};
-use crate::sys::fs::{atomic_write, set_perm};
 
-use crate::runtime::kind::Runtime;
 use super::logs::{read_tail, strip_ansi};
 use super::validate::{
     cwd_escapes_home, scaffold_node_entry, validate_add_args, validate_meta_value,
     validate_rust_entry, write_env_file,
 };
 use super::{get_status, signal_sync, stop_internal, with_debug};
+use crate::runtime::kind::Runtime;
 
 /// Args bundle for `cmd_add` — keeps the public function signature short.
 pub struct AddArgs<'a> {
@@ -306,7 +306,7 @@ pub(crate) fn cmd_set_node_version(
 /// the root prelude can persist it *before* re-resolving every sibling's cap.
 pub(crate) fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid: u32, gid: u32) {
     if megabytes != 0 && megabytes < 16 {
-        return;   // validated (and reported) by cmd_set_memory_max
+        return; // validated (and reported) by cmd_set_memory_max
     }
     let app_file = state_dir.join(".run").join(format!("{name}.app"));
     let Ok(current) = std::fs::read_to_string(&app_file) else {
@@ -317,7 +317,7 @@ pub(crate) fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid
     let mut out = String::with_capacity(current.len() + 32);
     for line in current.lines() {
         if line.split_once('=').map(|(k, _)| k.trim()) == Some("memory_max") {
-            continue;   // rewritten below (or dropped, when clearing)
+            continue; // rewritten below (or dropped, when clearing)
         }
         out.push_str(line);
         out.push('\n');
@@ -332,14 +332,22 @@ pub(crate) fn apply_memory_max(state_dir: &Path, name: &str, megabytes: u64, uid
     let _ = crate::sys::fs::chown_path(&app_file, uid, gid);
 }
 
-pub(crate) fn cmd_set_memory_max(state_dir: &Path, name: &str, megabytes: u64, dbg: Option<&Value>) -> ! {
+pub(crate) fn cmd_set_memory_max(
+    state_dir: &Path,
+    name: &str,
+    megabytes: u64,
+    dbg: Option<&Value>,
+) -> ! {
     if load_app_meta(state_dir, name).is_err() {
         user_error("app_not_found", &format!("app '{name}' not found"));
     }
     // 16 MB is below anything a Node process can start in; accepting less would
     // just produce an app that is OOM-killed on boot.
     if megabytes != 0 && megabytes < 16 {
-        user_error("invalid_memory_max", "memory cap must be 0 (auto) or at least 16 MB");
+        user_error(
+            "invalid_memory_max",
+            "memory cap must be 0 (auto) or at least 16 MB",
+        );
     }
 
     // The write and the cap re-resolution already happened in the root prelude.

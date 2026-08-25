@@ -16,9 +16,9 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
 
+use crate::sys::fs::parse_kv;
 use crate::sys::proc::{is_process_alive, read_proc_starttime, read_proc_uid};
 use crate::sys::state::{AppMeta, SYNC_MARKER};
-use crate::sys::fs::parse_kv;
 
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -45,14 +45,17 @@ pub(crate) fn with_debug(mut val: Value, debug: Option<&Value>) -> Value {
 /// many. The installed path is used rather than `/proc/self/exe` because this
 /// binary is setuid and that path is the one the installer owns.
 pub(crate) fn start_app_detached(username: &str, name: &str) -> bool {
-    std::process::Command::new(format!("{}/bin/core-selynt", crate::sys::state::PLUGIN_PATH))
-        .arg("start")
-        .arg(name)
-        .env("USERNAME", username)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    std::process::Command::new(format!(
+        "{}/bin/core-selynt",
+        crate::sys::state::PLUGIN_PATH
+    ))
+    .arg("start")
+    .arg(name)
+    .env("USERNAME", username)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .is_ok_and(|s| s.success())
 }
 
 /// Determines `(status, pid, started_at)` for an app, validating the PID
@@ -88,7 +91,10 @@ pub(crate) fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, 
 
 /// Lightweight status check used by the admin command. Skips UID matching
 /// because admin reads other users' state dirs as root before the drop.
-pub(crate) fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u32>, Option<u64>) {
+pub(crate) fn admin_get_status(
+    pid_file: &Path,
+    meta_file: &Path,
+) -> (String, Option<u32>, Option<u64>) {
     let Ok(pid_str) = std::fs::read_to_string(pid_file) else {
         return ("STOPPED".to_string(), None, None);
     };

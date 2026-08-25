@@ -1,5 +1,5 @@
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -172,9 +172,7 @@ pub(crate) fn account_is_isolated(state_dir: &Path) -> bool {
 /// must act on this, or they strand the real file and delete one that was never
 /// there. Falls back to the configured path when nothing was recorded.
 pub(crate) fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
-    let meta_file = state_dir
-        .join(".run")
-        .join(format!("{}.meta", meta.name));
+    let meta_file = state_dir.join(".run").join(format!("{}.meta", meta.name));
 
     std::fs::read_to_string(meta_file)
         .ok()
@@ -225,7 +223,10 @@ pub(crate) fn load_app_meta(state_dir: &Path, name: &str) -> Result<AppMeta> {
         domain: kv.get("domain").cloned().unwrap_or_default(),
         subdomain: kv.get("subdomain").cloned().unwrap_or_default(),
         node_version: kv.get("node_version").cloned().unwrap_or_default(),
-        memory_max: kv.get("memory_max").and_then(|v| v.parse().ok()).filter(|&n| n > 0),
+        memory_max: kv
+            .get("memory_max")
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0),
         created_at: kv.get("created_at").and_then(|v| v.parse().ok()),
     })
 }

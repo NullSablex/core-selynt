@@ -259,9 +259,7 @@ mod tests {
     #[test]
     fn ipv6_wildcard_is_external() {
         // :: — the dual-stack catch-all, as seen on the server.
-        assert!(is_externally_bound(
-            "00000000000000000000000000000000:006E"
-        ));
+        assert!(is_externally_bound("00000000000000000000000000000000:006E"));
     }
 
     /// A dual-stack bind to localhost can surface as a v4-mapped address; it is
@@ -276,9 +274,7 @@ mod tests {
     /// A v4-mapped *public* address is the real thing and must be caught.
     #[test]
     fn v4_mapped_public_is_external() {
-        assert!(is_externally_bound(
-            "0000000000000000FFFF00000500000A:1F90"
-        ));
+        assert!(is_externally_bound("0000000000000000FFFF00000500000A:1F90"));
     }
 
     #[test]

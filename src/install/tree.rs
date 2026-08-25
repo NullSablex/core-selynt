@@ -76,7 +76,10 @@ mod tests {
 
     #[test]
     fn service_files_are_not_executable() {
-        assert_eq!(expected_mode(Path::new("/x/scripts/selynt-panel.service")), 0o644);
+        assert_eq!(
+            expected_mode(Path::new("/x/scripts/selynt-panel.service")),
+            0o644
+        );
     }
 
     #[test]

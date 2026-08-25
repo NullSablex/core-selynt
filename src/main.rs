@@ -1,8 +1,8 @@
 mod admin;
 mod app;
-mod plan;
 mod install;
 mod limits;
+mod plan;
 mod runtime;
 mod sys;
 mod webserver;
@@ -15,9 +15,7 @@ use std::path::{Path, PathBuf};
 use runtime::kind::Runtime;
 use sys::auth::{drop_privileges, resolve_target_user};
 use sys::output::system_error;
-use sys::state::{
-    DA_USERS_BASE, STATE_BASE, init_app_logs_dir, init_state_dir, load_app_meta,
-};
+use sys::state::{DA_USERS_BASE, STATE_BASE, init_app_logs_dir, init_state_dir, load_app_meta};
 
 #[derive(Parser)]
 #[command(

@@ -57,17 +57,16 @@ pub(crate) fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
 /// `stop_internal` cannot, because it resolves the process through
 /// `get_status`, which requires the caller's uid to match the app's.
 pub(crate) fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
-    let pids: Vec<u32> = std::fs::read_to_string(
-        state_dir.join(".run").join(format!("{name}.pid")),
-    )
-    .ok()
-    .and_then(|p| p.trim().parse::<u32>().ok())
-    .map(|pid| {
-        let mut all = vec![pid];
-        all.extend(crate::sys::proc::descendants_of(pid));
-        all
-    })
-    .unwrap_or_default();
+    let pids: Vec<u32> =
+        std::fs::read_to_string(state_dir.join(".run").join(format!("{name}.pid")))
+            .ok()
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .map(|pid| {
+                let mut all = vec![pid];
+                all.extend(crate::sys::proc::descendants_of(pid));
+                all
+            })
+            .unwrap_or_default();
 
     if !pids.is_empty() {
         // Keeps `.enabled`: the app is coming straight back up.

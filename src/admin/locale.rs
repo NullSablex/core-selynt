@@ -7,9 +7,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
 use crate::sys::fs::chown_path;
-
+use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
 
 /// Validates a locale code against the dictionaries shipped under
 /// `lib/i18n/*.json`. `en` is always accepted (the built-in default). Returns

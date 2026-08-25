@@ -110,7 +110,12 @@ fn check_ownership_and_modes(r: &mut Report) {
     if foreign == 0 {
         r.add(Level::Pass, "install", "ownership_ok", None);
     } else {
-        r.add(Level::Fail, "install", "ownership_bad", Some(foreign.to_string()));
+        r.add(
+            Level::Fail,
+            "install",
+            "ownership_bad",
+            Some(foreign.to_string()),
+        );
     }
 
     if wrong_mode.is_empty() {
@@ -181,7 +186,12 @@ fn check_state_dir(r: &mut Report) {
             }
         }
     }
-    r.add(Level::Pass, "state", "registered", Some(format!("{apps}|{accounts}")));
+    r.add(
+        Level::Pass,
+        "state",
+        "registered",
+        Some(format!("{apps}|{accounts}")),
+    );
 
     for path in unowned {
         r.add(Level::Warn, "state", "app_not_owned", Some(path));
@@ -210,9 +220,7 @@ fn check_acl_support(r: &mut Report) {
     // silently fallen back on every start.
     let widened: Vec<String> = crate::sys::state::list_accounts()
         .into_iter()
-        .filter(|(dir, _)| {
-            std::fs::metadata(dir).is_ok_and(|m| m.mode() & 0o001 != 0)
-        })
+        .filter(|(dir, _)| std::fs::metadata(dir).is_ok_and(|m| m.mode() & 0o001 != 0))
         .map(|(_, user)| user)
         .collect();
 
@@ -290,7 +298,12 @@ fn check_proxy_config(r: &mut Report) {
             Some(format!("{with_proxy}|{checked}")),
         );
     } else {
-        r.add(Level::Warn, "proxy", "vhosts_unpatched", Some(checked.to_string()));
+        r.add(
+            Level::Warn,
+            "proxy",
+            "vhosts_unpatched",
+            Some(checked.to_string()),
+        );
     }
 }
 

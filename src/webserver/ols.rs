@@ -245,7 +245,11 @@ mod tests {
         upsert_block(&p, &block2).unwrap();
 
         let out = std::fs::read_to_string(&p).unwrap();
-        assert_eq!(out.matches(BEGIN_MARK).count(), 1, "block duplicated: {out}");
+        assert_eq!(
+            out.matches(BEGIN_MARK).count(),
+            1,
+            "block duplicated: {out}"
+        );
         assert!(out.contains("second"));
         assert!(!out.contains("first"));
         let _ = std::fs::remove_file(p);

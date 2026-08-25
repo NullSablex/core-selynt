@@ -252,7 +252,10 @@ impl Lock {
         // SAFETY: `flock` only needs a valid descriptor, which the file owns
         // for as long as this value lives.
         let locked = unsafe {
-            libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB)
+            libc::flock(
+                std::os::unix::io::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
         } == 0;
 
         locked.then_some(Self(file))

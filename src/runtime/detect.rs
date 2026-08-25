@@ -168,7 +168,10 @@ mod tests {
             "/usr/local/lib/nodejs/node-v25.9.0/bin/node",
             "/opt/alt/alt-nodejs20/root/usr/bin/node",
         ] {
-            assert!(is_trusted_runtime_path(Path::new(p)), "{p} should be trusted");
+            assert!(
+                is_trusted_runtime_path(Path::new(p)),
+                "{p} should be trusted"
+            );
         }
     }
 
@@ -195,7 +198,11 @@ mod tests {
             return;
         };
         if canonical.starts_with("/usr/bin/") {
-            assert!(is_safe_to_execute(&canonical), "{} should pass", canonical.display());
+            assert!(
+                is_safe_to_execute(&canonical),
+                "{} should pass",
+                canonical.display()
+            );
         }
     }
 
@@ -210,7 +217,10 @@ mod tests {
             "/var/tmp/node",
             "/usr/local-evil/node",
         ] {
-            assert!(!is_trusted_runtime_path(Path::new(p)), "{p} must be rejected");
+            assert!(
+                !is_trusted_runtime_path(Path::new(p)),
+                "{p} must be rejected"
+            );
         }
     }
 }

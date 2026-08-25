@@ -86,9 +86,10 @@ pub(crate) fn create_for_add(
             format!("could not resolve home directory for '{username}'"),
         )
     })?;
-    let cwd = args
-        .cwd
-        .map_or_else(|| super::validate::default_cwd(&home, args.name), str::to_string);
+    let cwd = args.cwd.map_or_else(
+        || super::validate::default_cwd(&home, args.name),
+        str::to_string,
+    );
 
     if let Some(err) = super::validate::cwd_refusal(&cwd, Path::new(&home)) {
         return Err(err);
@@ -144,8 +145,7 @@ mod tests {
 
     /// Tagged per test: they run in parallel and would otherwise share a path.
     fn tmp_with(tag: &str, content: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir()
-            .join(format!("selynt-appfile-{tag}-{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("selynt-appfile-{tag}-{}", std::process::id()));
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         p

@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::sys::output::success;
-use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
 use crate::sys::auth::user_exists;
 use crate::sys::fs::{atomic_write, set_perm};
+use crate::sys::output::success;
+use crate::sys::state::{PLUGIN_PATH, STATE_BASE};
 
 use crate::app::with_debug;
 
@@ -139,7 +139,9 @@ fn apply_ownership() -> Result<(), String> {
     });
 
     if failed > 0 {
-        return Err(format!("{failed} path(s) could not be set to their expected mode"));
+        return Err(format!(
+            "{failed} path(s) could not be set to their expected mode"
+        ));
     }
 
     // Last, and separately: `chown` clears the setuid bit, so the order matters.
@@ -181,8 +183,11 @@ pub(crate) fn run() -> Result<Value, (String, String)> {
     let ids = detect_identities();
 
     write_etc("da_user", &ids.da_user).map_err(|e| ("write_failed".to_string(), e))?;
-    write_etc("da_uid", &ids.da_uid.map_or_else(String::new, |u| u.to_string()))
-        .map_err(|e| ("write_failed".to_string(), e))?;
+    write_etc(
+        "da_uid",
+        &ids.da_uid.map_or_else(String::new, |u| u.to_string()),
+    )
+    .map_err(|e| ("write_failed".to_string(), e))?;
 
     if let Some(cgi) = &ids.cgi_user {
         write_etc("da_cgi_user", cgi).map_err(|e| ("write_failed".to_string(), e))?;

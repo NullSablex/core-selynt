@@ -2,24 +2,24 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use serde_json::{Value, json};
 
-use crate::webserver::acl::apply_acl;
 use crate::runtime::kind::Runtime;
+use crate::sys::fs::{atomic_write, set_perm};
 use crate::sys::output::{debug, success, system_error, user_error};
 use crate::sys::proc::{
     ProcessSnapshot, has_external_listen, is_process_alive, read_proc_snapshot, read_proc_starttime,
 };
 use crate::sys::state::{AppMeta, PLUGIN_PATH, load_app_meta, socket_path_for};
-use crate::sys::fs::{atomic_write, set_perm};
+use crate::webserver::acl::apply_acl;
 
 use super::logs::rotate_log_if_needed;
-use crate::runtime::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
 use super::{get_status, signal_sync, to_nix_pid, validate_safe_component, with_debug};
+use crate::runtime::node::{NODE_MIN_MAJOR, NODE_MIN_MINOR, get_node_version_raw, node_version_ok};
 
 /// Absolute ceiling for socket creation (any app type).
 const SOCKET_HARD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -84,9 +84,9 @@ fn publish_route(
     marker_path: &Path,
     web_user: &str,
 ) {
-    if let Err(e) = std::fs::write(marker_path, b"")
-        .and_then(|()| std::fs::set_permissions(marker_path, std::fs::Permissions::from_mode(0o644)))
-    {
+    if let Err(e) = std::fs::write(marker_path, b"").and_then(|()| {
+        std::fs::set_permissions(marker_path, std::fs::Permissions::from_mode(0o644))
+    }) {
         system_error("marker_failed", &format!("{e:#}"));
     }
 
@@ -218,7 +218,11 @@ fn open_log_files(cwd: &Path, name: &str) -> (std::fs::File, std::fs::File) {
     let open = |path: &Path, which: &str| {
         rotate_log_if_needed(path);
         let _ = std::fs::write(path, b"");
-        match std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        match std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
             Ok(f) => f,
             Err(e) => system_error("log_open_failed", &format!("{which} log: {e:#}")),
         }
@@ -324,10 +328,10 @@ fn spawn_app(
         });
     }
 
-    let cmd_display = Runtime::from_str(&meta.app_type)
-        .map_or_else(|()| entry_path.display().to_string(), |rt| {
-            rt.command_display(&entry_path)
-        });
+    let cmd_display = Runtime::from_str(&meta.app_type).map_or_else(
+        |()| entry_path.display().to_string(),
+        |rt| rt.command_display(&entry_path),
+    );
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => system_error("spawn_failed", &format!("{cmd_display}: {e:#}")),
@@ -384,7 +388,6 @@ fn scope_unit_name(username: &str, name: &str) -> String {
     format!("selynt-{username}-{name}.scope")
 }
 
-
 /// Wraps `cmd` in `systemd-run --scope` so the app lands in a cgroup of its own.
 ///
 /// Without it the app inherits the cgroup of whatever started it and systemd
@@ -407,7 +410,10 @@ fn wrap_in_scope(
         .arg(format!("--unit={}", scope_unit_name(username, name)))
         // The account's slice is the ceiling the kernel enforces over all of
         // its apps together; the per-app maxima below may exceed it on purpose.
-        .arg(format!("--slice={}", crate::limits::policy::slice_unit_name(username)))
+        .arg(format!(
+            "--slice={}",
+            crate::limits::policy::slice_unit_name(username)
+        ))
         .arg(format!("--uid={uid}"))
         .arg(format!("--gid={gid}"))
         // Keep the app alive when systemd stops the unit that spawned it.
@@ -673,7 +679,14 @@ mod tests {
             high: 96 * 1024 * 1024,
             max: 128 * 1024 * 1024,
         };
-        let wrapped = wrap_in_scope(Command::new("/bin/true"), "bob", "api", 1003, 1003, Some(limits));
+        let wrapped = wrap_in_scope(
+            Command::new("/bin/true"),
+            "bob",
+            "api",
+            1003,
+            1003,
+            Some(limits),
+        );
         let args: Vec<String> = wrapped
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())

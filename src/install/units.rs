@@ -238,7 +238,11 @@ mod tests {
 
         for unit in &UNITS {
             let rendered = unit.content.replace("{BIN}", &bin);
-            assert!(!rendered.contains("{BIN}"), "{}: placeholder left", unit.name);
+            assert!(
+                !rendered.contains("{BIN}"),
+                "{}: placeholder left",
+                unit.name
+            );
 
             // Timers carry no ExecStart; services do.
             if unit.name.ends_with(".service") {
@@ -264,7 +268,11 @@ mod tests {
                 );
             }
             if unit.start_now {
-                assert!(unit.name.ends_with(".timer"), "{} started eagerly", unit.name);
+                assert!(
+                    unit.name.ends_with(".timer"),
+                    "{} started eagerly",
+                    unit.name
+                );
             }
         }
     }

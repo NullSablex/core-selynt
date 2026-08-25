@@ -170,7 +170,11 @@ mod tests {
             .filter(|(i, _)| i > &0 && args[i - 1] == "--bind")
             .map(|(_, a)| a)
             .collect();
-        assert_eq!(rw_binds.len(), 2, "only app dir and socket dir: {rw_binds:?}");
+        assert_eq!(
+            rw_binds.len(),
+            2,
+            "only app dir and socket dir: {rw_binds:?}"
+        );
         assert!(!args.iter().any(|a| a == "/home/bob/apps"));
     }
 

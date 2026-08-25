@@ -24,7 +24,6 @@ pub(crate) enum CwdError {
     Outside { resolved: String, home: String },
 }
 
-
 /// Where an app's code lives when the caller does not say: `<home>/apps/<name>`.
 ///
 /// The home comes from DirectAdmin, which is what makes this pass
@@ -97,10 +96,8 @@ pub(super) fn cwd_escapes_home(path: &Path) -> bool {
     let Ok(home) = std::env::var("HOME") else {
         return true;
     };
-    let (Ok(home_real), Ok(target)) = (
-        std::fs::canonicalize(&home),
-        std::fs::canonicalize(path),
-    ) else {
+    let (Ok(home_real), Ok(target)) = (std::fs::canonicalize(&home), std::fs::canonicalize(path))
+    else {
         return true;
     };
     !target.starts_with(&home_real)
