@@ -116,17 +116,13 @@ pub(crate) fn cmd_restart(
 }
 
 pub(crate) fn cmd_add(state_dir: &Path, args: &AddArgs<'_>, dbg: Option<&Value>) -> ! {
-    let resolved_cwd = args.cwd.map_or_else(
-        || {
-            state_dir
-                .join("apps")
-                .join("nodejs")
-                .join(args.host)
-                .to_string_lossy()
-                .into_owned()
-        },
-        str::to_string,
-    );
+    // The prelude resolved and checked this already, and wrote it into the
+    // `.app` file. Reading it back is what keeps the two from disagreeing:
+    // duplicating the default here is how the old one drifted into pointing
+    // outside the home, where the check would then refuse it.
+    let resolved_cwd = crate::sys::state::load_app_meta(state_dir, args.name)
+        .map(|m| m.cwd)
+        .unwrap_or_else(|_| args.cwd.unwrap_or_default().to_string());
     let cwd = resolved_cwd.as_str();
 
     validate_add_args(args, cwd);

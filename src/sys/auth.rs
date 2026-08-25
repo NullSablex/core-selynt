@@ -35,6 +35,15 @@ const SERVICE_ACCOUNT_FILES: [&str; 3] =
 
 /// Looks up an account by name, returning `(uid, gid, home)`.
 /// uid and gid of a system account, when it exists.
+/// The account's home directory, from the system account database.
+///
+/// The root prelude cannot use `$HOME`: it is inherited from whoever invoked
+/// the binary, which for the panel is the web server, not the account being
+/// acted on.
+pub(crate) fn lookup_home(username: &str) -> Option<String> {
+    lookup_user(username).ok().map(|(_, _, home)| home)
+}
+
 pub(crate) fn lookup_user_ids(username: &str) -> Option<(u32, u32)> {
     lookup_user(username).ok().map(|(uid, gid, _)| (uid, gid))
 }

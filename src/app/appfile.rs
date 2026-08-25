@@ -71,6 +71,7 @@ pub(crate) fn rewrite_key(path: &Path, key: &str, value: &str) -> Option<String>
 pub(crate) fn create_for_add(
     state_dir: &Path,
     args: &super::commands::AddArgs<'_>,
+    username: &str,
     gid: u32,
 ) -> Result<(), (String, String)> {
     let path = app_file_path(state_dir, args.name);
@@ -82,17 +83,27 @@ pub(crate) fn create_for_add(
         ));
     }
 
-    let cwd = args.cwd.map_or_else(
-        || {
-            state_dir
-                .join("apps")
-                .join("nodejs")
-                .join(args.host)
-                .to_string_lossy()
-                .into_owned()
-        },
-        str::to_string,
-    );
+    // Resolve and check the working directory *before* writing anything.
+    //
+    // `cmd_add` validates too, but it only runs after the privilege drop — by
+    // which point this function has already created the file. A rejected `cwd`
+    // therefore used to leave a root-owned `.app` behind: the command answered
+    // `cwd_outside_home`, and the app still showed up in the listing and still
+    // started, running code from wherever the caller pointed at. A
+    // world-writable directory like /tmp made that anyone's code.
+    let home = super::super::sys::auth::lookup_home(username).ok_or_else(|| {
+        (
+            "invalid_cwd".to_string(),
+            format!("could not resolve home directory for '{username}'"),
+        )
+    })?;
+    let cwd = args
+        .cwd
+        .map_or_else(|| super::validate::default_cwd(&home, args.name), str::to_string);
+
+    if let Some(err) = super::validate::cwd_refusal(&cwd, Path::new(&home)) {
+        return Err(err);
+    }
 
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

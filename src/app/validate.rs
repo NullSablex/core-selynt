@@ -32,6 +32,45 @@ pub(crate) enum CwdError {
 }
 
 
+/// Where an app's code lives when the caller does not say.
+///
+/// `<home>/apps/<name>`. The home comes from DirectAdmin, which is what makes
+/// the path pass [`check_cwd_within_home`]; the `apps/` level and the choice of
+/// the app's *name* over its host are the panel's own convention — the name is
+/// the app's identity and cannot change, while a host can be repointed without
+/// the code moving.
+///
+/// An earlier default put this under the state directory
+/// (`/var/lib/selynt_panel/<account>/apps/nodejs/<host>`), which the home check
+/// rejects. Nothing ever created an app there: it made `add` without `--cwd`
+/// fail outright, and the two copies of that expression had to agree for it to
+/// even be reached.
+pub(crate) fn default_cwd(home: &str, name: &str) -> String {
+    format!("{home}/apps/{name}")
+}
+
+/// [`check_cwd_within_home`] as an error the caller can report, rather than one
+/// that ends the process.
+///
+/// The root prelude needs this shape: it writes the `.app` file, and a refusal
+/// there has to stop the write and travel back as JSON — not exit, and above
+/// all not leave the file behind.
+pub(crate) fn cwd_refusal(cwd: &str, home: &Path) -> Option<(String, String)> {
+    match check_cwd_within_home(cwd, home) {
+        Ok(()) => None,
+        Err(CwdError::NotAbsolute) => {
+            Some(("invalid_cwd".into(), "cwd must be an absolute path".into()))
+        }
+        Err(CwdError::Unresolvable) => {
+            Some(("invalid_cwd".into(), "cwd could not be resolved".into()))
+        }
+        Err(CwdError::Outside { resolved, home }) => Some((
+            "cwd_outside_home".into(),
+            format!("cwd must stay inside {home} (resolved to {resolved})"),
+        )),
+    }
+}
+
 pub(super) fn validate_add_args(args: &AddArgs<'_>, cwd: &str) {
     if !validate_name(args.name) {
         user_error("invalid_name", "name must match ^[A-Za-z0-9._-]{1,64}$");
@@ -338,5 +377,46 @@ mod tests {
         assert!(!validate_meta_value("x\nhost=evil"));
         assert!(!validate_meta_value("x\rhost=evil"));
         assert!(!validate_meta_value("x\0y"));
+    }
+
+    /// The default has to survive the check that runs right after it.
+    ///
+    /// It once did not: the default pointed under the state directory, the home
+    /// check refused it, and `add` without `--cwd` could not succeed at all.
+    #[test]
+    fn the_default_cwd_passes_the_home_check() {
+        let home = tmp_home();
+        let home_str = home.to_string_lossy().to_string();
+
+        let cwd = default_cwd(&home_str, "minha-app");
+        assert_eq!(cwd, format!("{home_str}/apps/minha-app"));
+        assert!(
+            cwd_refusal(&cwd, &home).is_none(),
+            "the default must not be refused: {cwd}"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A refused `cwd` must be refused through the same rule the command uses,
+    /// so the prelude and the command cannot disagree about what is allowed.
+    #[test]
+    fn cwd_refusal_reports_what_the_command_reports() {
+        let home = tmp_home();
+
+        let (code, _) = cwd_refusal("/tmp/fora-do-home", &home).expect("must be refused");
+        assert_eq!(code, "cwd_outside_home");
+
+        let (code, _) = cwd_refusal("relativo/nao-serve", &home).expect("must be refused");
+        assert_eq!(code, "invalid_cwd");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A home that exists, so `canonicalize` inside the check has something to
+    /// resolve.
+    fn tmp_home() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("selynt-home-{}", std::process::id()));
+        std::fs::create_dir_all(p.join("apps")).unwrap();
+        p
     }
 }

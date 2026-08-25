@@ -548,6 +548,7 @@ fn run_root_prelude(
                 node_version: node_version.as_deref(),
                 env_vars,
             },
+            username,
             gid,
         )),
         Commands::SetNodeVersion { name, node_version } => Some(app::appfile::update_key(
