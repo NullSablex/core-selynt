@@ -94,6 +94,15 @@ pub fn detect_node_versions() -> Vec<(String, String)> {
             versions.push((path.to_string_lossy().to_string(), ver));
         }
     }
+
+    // Da mais nova para a mais antiga. Sem isto a ordem é a da varredura — os
+    // caminhos fixos antes dos globs, e cada glob na ordem que o diretório
+    // devolve —, então a lista saía como v25, v20, v22, v24.
+    versions.sort_by(|(_, a), (_, b)| {
+        super::node::parse_node_semver(b)
+            .cmp(&super::node::parse_node_semver(a))
+            .then_with(|| a.cmp(b))
+    });
     versions
 }
 
@@ -256,5 +265,27 @@ mod tests {
         for p in NODE_FIXED_PATHS {
             assert!(p.starts_with('/'), "{p} must be absolute");
         }
+    }
+
+    /// A lista sai da versão mais nova para a mais antiga.
+    ///
+    /// Sem ordenar, ela seguia a varredura: os caminhos fixos primeiro, depois
+    /// cada glob na ordem que o diretório devolvesse — o que no servidor
+    /// resultava em v25, v20, v22, v24, sem lógica visível para quem escolhe.
+    #[test]
+    fn versions_are_listed_newest_first() {
+        let mut v = vec![
+            ("/usr/local/bin/node".to_string(), "v25.9.0".to_string()),
+            ("/nvm/20/node".to_string(), "v20.20.2".to_string()),
+            ("/nvm/22/node".to_string(), "v22.23.2".to_string()),
+            ("/nvm/24/node".to_string(), "v24.19.0".to_string()),
+        ];
+        v.sort_by(|(_, a), (_, b)| {
+            super::super::node::parse_node_semver(b)
+                .cmp(&super::super::node::parse_node_semver(a))
+                .then_with(|| a.cmp(b))
+        });
+        let ordem: Vec<&str> = v.iter().map(|(_, ver)| ver.as_str()).collect();
+        assert_eq!(ordem, ["v25.9.0", "v24.19.0", "v22.23.2", "v20.20.2"]);
     }
 }
