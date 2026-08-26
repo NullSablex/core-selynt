@@ -17,6 +17,7 @@ use nix::unistd::Pid;
 use serde_json::Value;
 
 use crate::sys::fs::parse_kv;
+use crate::sys::output::debug;
 use crate::sys::proc::{is_process_alive, read_proc_starttime, read_proc_uid};
 use crate::sys::state::{AppMeta, SYNC_MARKER};
 
@@ -52,10 +53,26 @@ pub fn start_app_detached(username: &str, name: &str) -> bool {
     .arg("start")
     .arg(name)
     .env("USERNAME", username)
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .is_ok_and(|s| s.success())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .map_or_else(
+        |e| {
+            debug(format!("start '{name}': could not spawn: {e}"));
+            false
+        },
+        |o| {
+            // The child's own message, kept: a failure here used to surface only
+            // as the app being down, with nothing saying why.
+            if !o.status.success() {
+                debug(format!(
+                    "start '{name}' failed: {}",
+                    String::from_utf8_lossy(&o.stdout).trim()
+                ));
+            }
+            o.status.success()
+        },
+    )
 }
 
 /// Determines `(status, pid, started_at)` for an app, validating the PID

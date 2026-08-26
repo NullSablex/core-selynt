@@ -357,8 +357,12 @@ fn load_env_file(cwd: &Path) -> Vec<(String, String)> {
 
 fn build_command(meta: &AppMeta, entry_path: &Path) -> Command {
     if Runtime::from_str(&meta.app_type).is_ok_and(Runtime::is_interpreted) {
+        // Absolute path, never the bare name: the app inherits the environment
+        // of whoever invoked the panel, and the CGI's `PATH` lacks
+        // `/usr/local/bin`. The same app started from a shell and failed from
+        // the panel — inside the sandbox as `execvp node: No such file`.
         let node_bin = if meta.node_version.is_empty() {
-            "node".to_string()
+            crate::runtime::detect::default_node_path().unwrap_or_else(|| "node".to_string())
         } else {
             meta.node_version.clone()
         };

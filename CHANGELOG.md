@@ -98,6 +98,14 @@ correção.
 
 ### Added
 
+**Documentos de contribuição**
+- `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `AI-POLICY.md`, templates de issue e
+  de pull request. O guia descreve o modelo de privilégio do `plan.rs`, que toda
+  mudança precisa respeitar, e o template de PR pergunta explicitamente se a
+  mudança amplia o que roda como root
+- O uso de IA é permitido e não sofre preconceito; quem contribui responde pelo
+  que envia, e não se atribui co-autoria a um assistente
+
 **Isolamento entre aplicações da mesma conta**
 - Novo `set-isolated --isolated true|false` (conta) e
   `admin save-default-isolated` (padrão do servidor). Ligado, cada app roda em
@@ -228,6 +236,41 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 **`remove` apagava o `.env` mesmo sem `--delete-dir` (#3)**
 - Com o diretório preservado, apenas os logs do app são removidos; `.env` e demais arquivos do usuário permanecem intactos
 
+**Aplicação sem versão fixada não iniciava pelo painel**
+- O comando era `node`, resolvido pelo `PATH` de quem invocou. Da linha de
+  comando funcionava; do CGI do DirectAdmin não, porque ali o `PATH` não traz
+  `/usr/local/bin`
+- O sintoma aparecia longe da causa: ao trocar o isolamento, a aplicação era
+  parada e não voltava, e o painel dizia apenas `failed` — o erro real
+  (`bwrap: execvp node: No such file or directory`) ficava no log da aplicação
+- `default_node_path` resolve entre os caminhos que a detecção já conhece, e a
+  falha do religamento passa a registrar a mensagem do filho
+
+**Mudar a cota de memória fazia a aplicação sumir do painel**
+- `apply_memory_max` tinha a própria escrita do `.app`: gravava 0600 e passava
+  o arquivo para a conta. Mas `load_app_meta` recusa `.app` que não seja do
+  root — é o que impede uma aplicação de forjar o arquivo que diz o que
+  executar
+- A aplicação desaparecia da listagem enquanto o processo seguia rodando, sem
+  nada ligando uma coisa à outra
+- Passa a usar `appfile::write_as_root`, como as demais escritas; um teste
+  recusa qualquer volta atrás
+
+**Handlers existiam em disco e o servidor web nunca os lia**
+- Sem `include selynt_extprocessors.conf` no `httpd_config.conf`, toda
+  aplicação responde 503 parecendo saudável: processo no ar, socket aceitando,
+  marcador no lugar. O desinstalador removia a linha e nada a escrevia de volta
+- O `setup` repõe a linha *depois* do `rewrite_confs`, porque o DirectAdmin
+  regenera o `httpd_config.conf` e leva a linha junto
+- O diagnóstico não olhava para isso e relatava 12 de 12 com o painel fora do
+  ar; agora falha explicando o que fazer
+
+**Páginas do painel ficavam sem permissão de execução**
+- A regra de permissão olhava a extensão `.html`, e as páginas deixaram de ter
+  extensão; ficavam 644, e o DirectAdmin não serve o que não pode executar
+- O modo passa a ser decidido pelo diretório: tudo em `user/`, `admin/` e
+  `reseller/` é script que o DA executa, e vai a 755
+
 ### Changed
 
 **Runtimes reunidos em `Runtime`**
@@ -237,6 +280,34 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 - Agora tudo o que difere (`is_interpreted`, `scaffolds_entry`,
   `requires_executable_entry`, `command_display`) pende do enum, e uma variante
   nova faz o compilador apontar cada decisão pendente
+
+**Actions do GitHub fixadas por SHA**
+- Uma tag é móvel: quem controla o repositório da action pode reapontar `@v7`
+  para outro commit, e o workflow roda o que vier — com o token do repositório
+  em mãos. O `rust.yml` já fazia assim; os demais não
+- O token deixa de nascer com poder de escrita: `release.yml` declarava
+  `contents: write` no topo, valendo para todos os jobs, e a permissão desce
+  para o job que publica
+- O `checks: write` do job de auditoria fica: a `rustsec/audit-check` documenta
+  essa permissão como necessária, e o Scorecard não distingue esse caso
+
+**Labels do repositório sincronizados por workflow**
+- O `labels.yml` existia e nada o aplicava. O labeler também aplicava `docs`,
+  que não estava definido ali, então o GitHub criava o label sozinho, sem cor
+  nem descrição
+
+**Tipo de aplicação `rust` renomeado para `binary`**
+- O painel oferecia "Binário Rust" e gravava `rust`, mas o core nunca olhou a
+  linguagem: ele executa o arquivo de entrada, e qualquer coisa que produza um
+  executável serve. O nome prometia uma restrição que não existe
+- Passa a ser `binary` no metadado e "Binário executável" na interface. O
+  identificador antigo não é aceito, para não deixar o painel gravando um nome
+  e lendo outro; nenhuma aplicação em produção usava `rust`
+
+**Versões do Node listadas da mais nova para a mais antiga**
+- A ordem era a da varredura — caminhos fixos primeiro, depois cada glob na
+  ordem que o diretório devolvesse. No servidor saía v25, v20, v22, v24, sem
+  lógica visível para quem precisa escolher
 
 ## [1.1.0] — 2026-03-29
 

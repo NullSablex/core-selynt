@@ -1,0 +1,67 @@
+name: Relatar um bug
+description: Comportamento incorreto do binário.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Inclua a saída JSON do comando: é ela que diz onde a execução parou.
+
+        Para vulnerabilidades de segurança, **não** abra uma issue: use o
+        [relato privado](https://github.com/NullSablex/core-selynt/security/advisories/new).
+        Este binário é setuid root, então falha de privilégio é sempre sensível.
+
+  - type: textarea
+    id: descricao
+    attributes:
+      label: Descrição
+      description: O que aconteceu e o que você esperava que acontecesse.
+    validations:
+      required: true
+
+  - type: textarea
+    id: comando
+    attributes:
+      label: Comando e saída
+      description: O comando executado e o JSON devolvido (será formatado como código).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducao
+    attributes:
+      label: Passos para reproduzir
+    validations:
+      required: true
+
+  - type: input
+    id: versao
+    attributes:
+      label: Versão do binário
+      description: 'Saída de `core-selynt --version`.'
+      placeholder: "core_selynt 1.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: directadmin
+    attributes:
+      label: Versão do DirectAdmin
+      placeholder: "1.708"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área
+      options:
+        - Ciclo de vida da aplicação (start, stop, restart)
+        - Isolamento ou cota de memória
+        - Proxy e servidor web
+        - Detecção de runtime ou versão do Node
+        - Instalação, atualização ou diagnóstico
+        - Outra
+    validations:
+      required: true

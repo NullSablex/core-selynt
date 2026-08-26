@@ -264,6 +264,18 @@ fn check_proxy_config(r: &mut Report) {
         Err(_) => r.add(Level::Warn, "proxy", "extproc_missing", None),
     }
 
+    // The handler file is only read if the main config includes it. Without the
+    // line every proxied app answers 503 while looking healthy from every other
+    // angle — process up, socket accepting, marker in place — and DirectAdmin
+    // drops it whenever it rewrites the file.
+    match std::fs::read_to_string(conf_dir.join("httpd_config.conf")) {
+        Ok(main) if main.contains("selynt_extprocessors.conf") => {
+            r.add(Level::Pass, "proxy", "include_ok", None);
+        }
+        Ok(_) => r.add(Level::Fail, "proxy", "include_missing", None),
+        Err(_) => r.add(Level::Warn, "proxy", "main_conf_unreadable", None),
+    }
+
     // A vhost only routes to the panel once it carries the proxy handler, and
     // that arrives when DirectAdmin rebuilds its configs from the templates.
     //

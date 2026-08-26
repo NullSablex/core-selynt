@@ -1,0 +1,46 @@
+name: Sugerir uma melhoria
+description: Propor uma funcionalidade ou mudança no binário.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Descreva o problema que a ideia resolve, não só a solução.
+
+  - type: textarea
+    id: problema
+    attributes:
+      label: Problema ou motivação
+      description: Que dificuldade ou necessidade a proposta atende?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposta
+    attributes:
+      label: Solução proposta
+      description: Como você imagina que funcionaria.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Alternativas consideradas
+      description: Outras formas de resolver o mesmo problema, e por que não servem.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área
+      options:
+        - Ciclo de vida da aplicação
+        - Isolamento ou cota
+        - Proxy e servidor web
+        - Runtimes e versões
+        - Instalação e diagnóstico
+        - Outra
+    validations:
+      required: false

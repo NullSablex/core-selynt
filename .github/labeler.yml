@@ -6,14 +6,20 @@ ci:
   - changed-files:
     - any-glob-to-any-file: ".github/**"
 
-docs:
+documentation:
   - changed-files:
     - any-glob-to-any-file:
-      - "README.md"
-      - "CHANGELOG.md"
+      - "**/*.md"
 
 dependencies:
   - changed-files:
     - any-glob-to-any-file:
       - "Cargo.toml"
       - "Cargo.lock"
+
+security:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "SECURITY.md"
+      - "src/sys/auth.rs"
+      - "src/limits/**"

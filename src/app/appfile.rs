@@ -174,3 +174,28 @@ mod tests {
         assert!(rewrite_key(std::path::Path::new("/nonexistent-selynt"), "k", "v").is_none());
     }
 }
+
+#[cfg(test)]
+mod ownership_tests {
+    /// Every `.app` write has to go through `write_as_root`.
+    ///
+    /// `apply_memory_max` once had its own copy, writing the file as the
+    /// account to keep it readable after the privilege drop. But
+    /// `load_app_meta` refuses a `.app` that is not root-owned, so changing an
+    /// app's memory cap made it disappear from the panel while its process kept
+    /// running — visible only as "the app vanished".
+    #[test]
+    fn no_other_code_writes_the_app_file() {
+        let src = include_str!("commands.rs");
+        for line in src.lines() {
+            let l = line.trim();
+            if l.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !(l.contains("atomic_write") && l.contains("app_file")),
+                "writes to `.app` must use appfile::write_as_root: {l}"
+            );
+        }
+    }
+}

@@ -22,11 +22,15 @@ pub fn expected_mode(path: &Path) -> u32 {
     if s.ends_with(".service") {
         return 0o644;
     }
-    if s.ends_with(".raw")
-        || s.ends_with(".html")
-        || (s.contains("/scripts/") && s.ends_with(".sh"))
-        || s.contains("/hooks/")
-    {
+    // DirectAdmin executes everything under the access-level directories as a
+    // CGI script — "Files should be set to executable mode (755)", says the
+    // plugin documentation — so the rule is the directory, not the extension.
+    // The pages carry no extension at all: the request path is the file name.
+    if s.contains("/user/") || s.contains("/admin/") || s.contains("/reseller/") {
+        return 0o755;
+    }
+
+    if (s.contains("/scripts/") && s.ends_with(".sh")) || s.contains("/hooks/") {
         return 0o755;
     }
     0o644
@@ -86,6 +90,9 @@ mod tests {
     fn cgi_endpoints_and_pages_are_executable() {
         assert_eq!(expected_mode(Path::new("/x/user/api/apps.raw")), 0o755);
         assert_eq!(expected_mode(Path::new("/x/user/index.html")), 0o755);
+        // The pages carry no extension: the request path is the file name.
+        assert_eq!(expected_mode(Path::new("/x/user/apps")), 0o755);
+        assert_eq!(expected_mode(Path::new("/x/admin/config")), 0o755);
         assert_eq!(expected_mode(Path::new("/x/scripts/install.sh")), 0o755);
         assert_eq!(expected_mode(Path::new("/x/hooks/anything")), 0o755);
     }

@@ -183,6 +183,18 @@ Aplicações que abrirem portas TCP ou UDP são **encerradas imediatamente** (`S
 
 ---
 
+## Contribuindo
+
+Leia o [guia de contribuição](CONTRIBUTING.md) antes de abrir uma issue ou pull
+request — este binário é setuid root, e o guia explica o modelo de privilégio
+que toda mudança precisa respeitar. Valem também o
+[código de conduta](CODE_OF_CONDUCT.md) e a
+[política de uso de IA](AI-POLICY.md).
+
+Falha de segurança **não** vai em issue pública: use o
+[relato privado](https://github.com/NullSablex/core-selynt/security/advisories/new),
+como descrito no [SECURITY.md](SECURITY.md).
+
 ## Licença
 
 Copyright © 2026 [NullSablex](https://github.com/NullSablex). Licenciado sob a [GNU AGPL-3.0-or-later](LICENSE).

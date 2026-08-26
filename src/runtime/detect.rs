@@ -56,6 +56,20 @@ fn node_candidates() -> Vec<PathBuf> {
 
 /// Detects Node.js runtimes installed on the system. Returns
 /// `Vec<(path, version)>` — e.g. `("/usr/bin/node", "v22.22.0")`.
+/// The interpreter to execute when an app names no version of its own.
+///
+/// Returns an absolute path, never the bare name: the app is launched with the
+/// environment of whoever invoked the panel, and the CGI's `PATH` does not
+/// carry `/usr/local/bin`. Relying on `PATH` made a Node app start from a shell
+/// and fail from the panel — inside the sandbox, as `execvp node: No such file
+/// or directory`.
+pub fn default_node_path() -> Option<String> {
+    NODE_FIXED_PATHS
+        .iter()
+        .find(|p| Path::new(p).is_file())
+        .map(|p| (*p).to_string())
+}
+
 pub fn detect_node_versions() -> Vec<(String, String)> {
     let candidates = node_candidates();
 
@@ -80,6 +94,15 @@ pub fn detect_node_versions() -> Vec<(String, String)> {
             versions.push((path.to_string_lossy().to_string(), ver));
         }
     }
+
+    // Da mais nova para a mais antiga. Sem isto a ordem é a da varredura — os
+    // caminhos fixos antes dos globs, e cada glob na ordem que o diretório
+    // devolve —, então a lista saía como v25, v20, v22, v24.
+    versions.sort_by(|(_, a), (_, b)| {
+        super::node::parse_node_semver(b)
+            .cmp(&super::node::parse_node_semver(a))
+            .then_with(|| a.cmp(b))
+    });
     versions
 }
 
@@ -156,7 +179,7 @@ fn is_root_owned_and_unwritable(path: &Path) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use super::is_trusted_runtime_path;
+    use super::{NODE_FIXED_PATHS, default_node_path, is_trusted_runtime_path};
     use std::path::Path;
 
     #[test]
@@ -222,5 +245,47 @@ mod tests {
                 "{p} must be rejected"
             );
         }
+    }
+
+    /// The default interpreter must be an absolute path.
+    ///
+    /// It used to be the bare name `node`, resolved through `PATH`. The app
+    /// inherits the environment of whoever invoked the panel, and the CGI's
+    /// `PATH` has no `/usr/local/bin` — so an app that started fine from a
+    /// shell died from the panel with `execvp node: No such file or directory`,
+    /// and switching isolation left it down.
+    #[test]
+    fn default_node_path_is_absolute_or_none() {
+        if let Some(p) = default_node_path() {
+            assert!(
+                std::path::Path::new(&p).is_absolute(),
+                "{p} must not depend on PATH"
+            );
+        }
+        for p in NODE_FIXED_PATHS {
+            assert!(p.starts_with('/'), "{p} must be absolute");
+        }
+    }
+
+    /// A lista sai da versão mais nova para a mais antiga.
+    ///
+    /// Sem ordenar, ela seguia a varredura: os caminhos fixos primeiro, depois
+    /// cada glob na ordem que o diretório devolvesse — o que no servidor
+    /// resultava em v25, v20, v22, v24, sem lógica visível para quem escolhe.
+    #[test]
+    fn versions_are_listed_newest_first() {
+        let mut v = [
+            ("/usr/local/bin/node".to_string(), "v25.9.0".to_string()),
+            ("/nvm/20/node".to_string(), "v20.20.2".to_string()),
+            ("/nvm/22/node".to_string(), "v22.23.2".to_string()),
+            ("/nvm/24/node".to_string(), "v24.19.0".to_string()),
+        ];
+        v.sort_by(|(_, a), (_, b)| {
+            super::super::node::parse_node_semver(b)
+                .cmp(&super::super::node::parse_node_semver(a))
+                .then_with(|| a.cmp(b))
+        });
+        let ordem: Vec<&str> = v.iter().map(|(_, ver)| ver.as_str()).collect();
+        assert_eq!(ordem, ["v25.9.0", "v24.19.0", "v22.23.2", "v20.20.2"]);
     }
 }
