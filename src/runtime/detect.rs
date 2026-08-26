@@ -274,7 +274,7 @@ mod tests {
     /// resultava em v25, v20, v22, v24, sem lógica visível para quem escolhe.
     #[test]
     fn versions_are_listed_newest_first() {
-        let mut v = vec![
+        let mut v = [
             ("/usr/local/bin/node".to_string(), "v25.9.0".to_string()),
             ("/nvm/20/node".to_string(), "v20.20.2".to_string()),
             ("/nvm/22/node".to_string(), "v22.23.2".to_string()),
