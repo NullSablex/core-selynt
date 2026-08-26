@@ -28,10 +28,16 @@
 `core-selynt` é invocado pelo plugin do Selynt Panel. Cada execução:
 
 1. Exige `euid=0` (setuid obrigatório)
-2. Resolve o usuário real via variável `USERNAME` → `/etc/passwd`
+2. Decide sobre quem pode agir a partir do **uid real** de quem chamou, preservado pelo setuid. Root e o usuário web do painel podem nomear qualquer conta em `USERNAME`; as demais contas agem apenas como si mesmas, e um `USERNAME` diferente do próprio é recusado
 3. Cria/valida o diretório de estado em `/var/lib/selynt_panel/{user}/`
 4. Faz **drop de privilégio** (`setuid`/`setgid`/`initgroups` + `PR_SET_NO_NEW_PRIVS`) antes de executar qualquer lógica
 5. Retorna JSON em stdout e sai com código `0` (sucesso), `1` (erro de usuário) ou `2` (erro de sistema)
+
+> [!IMPORTANT]
+> O binário é setuid root e executável por qualquer conta local do servidor.
+> Nada vindo do chamador é tratado como autorização: `USERNAME`,
+> `SELYNT_STATE_DIR`, `NVM_DIR`, `HOME` e caminhos de aplicação são validados
+> contra o uid real antes do uso.
 
 ---
 
@@ -94,6 +100,11 @@ remove <name> [--delete-dir]      Remove o app (e opcionalmente o cwd)
 logs   <name> [--lines N]         Últimas N linhas de log stdout (padrão: 100)
        [--stderr]                 Ler stderr em vez de stdout
 domains [--domain D]              Lista domínios/subdomínios do usuário
+set-node-version <name> <path>    Troca o runtime do app
+set-memory-max <name> <valor>     Define o teto de memória do app
+set-isolated --isolated <bool>    Liga/desliga o isolamento entre apps da conta
+status-isolated                   Estado atual do isolamento da conta
+set-locale <code>                 Idioma do painel para a conta
 ```
 
 ### Opções de `add`
@@ -105,17 +116,23 @@ domains [--domain D]              Lista domínios/subdomínios do usuário
 --cwd   <diretório>      Diretório raiz do app (padrão: apps/nodejs/{host})
 --domain <domínio>       Domínio associado (opcional)
 --subdomain <subdomínio> Subdomínio associado (opcional)
---node-version <path>    Caminho para o binário runtime (opcional; usa o do PATH se omitido)
+--node-version <path>    Caminho para o binário runtime (opcional). Omitido, resolve
+                         um caminho absoluto entre os que a detecção conhece — nunca
+                         o nome puro: o `PATH` do CGI não traz `/usr/local/bin`, e
+                         confiar nele fazia o app subir pelo shell e falhar pelo painel
 --env KEY=VAL            Variável de ambiente (repetível)
 ```
 
-### Comandos admin (requer `diradmin`)
+### Comandos admin (requer root ou o usuário web do painel)
 
 ```
 admin version                        Versão do binário
 admin list                           Apps de todos os usuários
 admin detect-nodes                   Detecta runtimes instalados no sistema
 admin save-node-versions <idx...>    Salva versões selecionadas por índice
+admin save-default-isolated          Isolamento padrão para contas novas
+admin set-locale <code>              Idioma padrão do painel no servidor
+admin diagnose                       Roda o diagnóstico da pilha de proxy
 ```
 
 ---
@@ -124,18 +141,27 @@ admin save-node-versions <idx...>    Salva versões selecionadas por índice
 
 | Variável | Obrigatória | Descrição |
 |---|---|---|
-| `USERNAME` | Sim | Usuário real para o qual o comando é executado |
-| `SELYNT_STATE_DIR` | Não | Sobrescreve o state dir (deve começar com `/var/lib/selynt_panel/`) |
+| `USERNAME` | Depende | Conta para a qual o comando é executado. Obrigatória quando o chamador é root. Contas comuns só podem informar o próprio nome — qualquer outro é recusado |
+| `SELYNT_STATE_DIR` | Não | Sobrescreve o state dir. Honrada **apenas** para root e o usuário web do painel; conferir só o prefixo não bastava, porque `/var/lib/selynt_panel/<outra-conta>` também o satisfaz |
 | `SELYNT_WEB_USER` | Não | Usuário web para ACL (alternativa ao arquivo `etc/ols_web_user`) |
 | `SELYNT_DEBUG` | Não | `1` para logs de debug em stderr |
-| `NVM_DIR` | Não | Usado por `admin detect-nodes` para encontrar versões NVM |
+| `NVM_DIR` | Não | Usado por `admin detect-nodes`. Aceita apenas caminhos sob `/opt/` ou `/usr/local/`: a detecção *executa* cada candidato para ler a versão, e sob `/home/` isso seria execução de código escolhido pela conta |
 
 ---
 
 ## Comportamento por tipo de app
 
+| `--type` | Entrada | Comportamento |
+|---|---|---|
+| `node` | arquivo `.js` | Interpretado: o runtime é resolvido por caminho absoluto, e o `add` cria o arquivo de entrada se ele não existir |
+| `binary` | executável | Executado direto. O core não olha como o arquivo foi produzido — qualquer linguagem que gere um executável serve |
+
 > [!NOTE]
-> Cada tipo de app possui tratamento específico no `start` e no `add`. O suporte a novos tipos pode ser adicionado em versões futuras. Variáveis de ambiente são sempre lidas do arquivo `.env` no cwd do app no momento do `start`, independente do tipo.
+> O tipo `binary` chamava-se `rust`. O identificador antigo não é aceito: o core
+> nunca olhou a linguagem, então o nome prometia uma restrição que não existe.
+
+> [!NOTE]
+> Cada tipo de app possui tratamento específico no `start` e no `add`. Variáveis de ambiente são sempre lidas do arquivo `.env` no cwd do app no momento do `start`, independente do tipo.
 
 ---
 
@@ -175,7 +201,11 @@ Aplicações que abrirem portas TCP ou UDP são **encerradas imediatamente** (`S
 - **Setsid em processos filhos:** cada app é spawnado com `setsid()` via `pre_exec`, tornando-o líder de sessão e evitando que sinais vazem para o processo pai
 - **Anti PID-reuse:** o PID é validado contra o `starttime` de `/proc/{pid}/stat` antes de enviar sinais
 - **Validação de UID:** `status` só reporta RUNNING se o PID pertencer ao usuário atual (`/proc/{pid}/status`)
-- **Bloqueio de portas de rede:** TCP/UDP são verificados via `/proc/net/{tcp,tcp6,udp,udp6}` após o start
+- **Autoridade pelo uid real:** quem pode agir sobre quem não vem de `USERNAME`, e sim do uid preservado pelo setuid. Contas comuns agem apenas como si mesmas, e os comandos `admin` exigem root ou o usuário web do painel
+- **`.app` pertence ao root:** é o arquivo que diz o que executar. Se a conta pudesse escrevê-lo, escolheria o que roda com privilégio; toda escrita passa por `write_as_root`, e metadado de outro dono é recusado
+- **Runtimes verificados antes de executar:** a detecção *executa* cada candidato para ler a versão, então só aceita binário do root em diretório não-gravável — árvores de runtime costumam ficar com o dono de quem as descompactou
+- **Isolamento entre apps da mesma conta:** com o isolamento ligado, cada app roda sem enxergar arquivos, processos ou sockets dos vizinhos
+- **Bloqueio de portas de rede:** TCP/UDP são verificados via `/proc/net/{tcp,tcp6,udp,udp6}` após o start, e uma varredura periódica derruba app que exponha porta alcançável de fora — bind em loopback continua permitido
 - **ACL no socket:** `setfacl` com fallback para `chmod` para o usuário web
 - **Validação de path traversal:** nomes de apps e `entry`/`host` são validados contra `..`, `/` e bytes nulos
 - **Criação atômica:** arquivos `.app` usam `create_new` para evitar race condition TOCTOU
