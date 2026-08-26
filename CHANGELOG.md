@@ -98,6 +98,14 @@ correção.
 
 ### Added
 
+**Documentos de contribuição**
+- `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `AI-POLICY.md`, templates de issue e
+  de pull request. O guia descreve o modelo de privilégio do `plan.rs`, que toda
+  mudança precisa respeitar, e o template de PR pergunta explicitamente se a
+  mudança amplia o que roda como root
+- O uso de IA é permitido e não sofre preconceito; quem contribui responde pelo
+  que envia, e não se atribui co-autoria a um assistente
+
 **Isolamento entre aplicações da mesma conta**
 - Novo `set-isolated --isolated true|false` (conta) e
   `admin save-default-isolated` (padrão do servidor). Ligado, cada app roda em
@@ -272,6 +280,21 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 - Agora tudo o que difere (`is_interpreted`, `scaffolds_entry`,
   `requires_executable_entry`, `command_display`) pende do enum, e uma variante
   nova faz o compilador apontar cada decisão pendente
+
+**Actions do GitHub fixadas por SHA**
+- Uma tag é móvel: quem controla o repositório da action pode reapontar `@v7`
+  para outro commit, e o workflow roda o que vier — com o token do repositório
+  em mãos. O `rust.yml` já fazia assim; os demais não
+- O token deixa de nascer com poder de escrita: `release.yml` declarava
+  `contents: write` no topo, valendo para todos os jobs, e a permissão desce
+  para o job que publica
+- O `checks: write` do job de auditoria fica: a `rustsec/audit-check` documenta
+  essa permissão como necessária, e o Scorecard não distingue esse caso
+
+**Labels do repositório sincronizados por workflow**
+- O `labels.yml` existia e nada o aplicava. O labeler também aplicava `docs`,
+  que não estava definido ali, então o GitHub criava o label sozinho, sem cor
+  nem descrição
 
 **Tipo de aplicação `rust` renomeado para `binary`**
 - O painel oferecia "Binário Rust" e gravava `rust`, mas o core nunca olhou a
