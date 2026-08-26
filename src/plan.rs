@@ -75,6 +75,13 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
             Box::new(move || app::commands::cmd_logs(&sd, &name, lines, stderr, d.as_ref()))
         }
 
+        // Reads package.json as the account, after the drop: a symlink out of
+        // the home resolves with the account's rights, never root's.
+        Commands::Scripts { name } => {
+            let (sd, d) = (state_dir, dbg);
+            Box::new(move || app::commands::cmd_scripts(&sd, &name, d.as_ref()))
+        }
+
         // `user.conf` belongs to `diradmin` and cannot be read after the drop.
         Commands::Stats { name } => {
             let da = limits::usage::read_da_limits(&username);

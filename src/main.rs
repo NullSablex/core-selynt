@@ -107,6 +107,12 @@ enum Commands {
     /// Reports CPU and memory usage of an app, with the account's limits.
     Stats { name: String },
 
+    /// Lists the script names declared in the app's `package.json`.
+    ///
+    /// Names only: a script body is arbitrary shell written by the customer,
+    /// and the panel has no reason to render it.
+    Scripts { name: String },
+
     /// Restarts every enabled app of every account, after a reboot.
     ///
     /// Runs as root from `selynt-panel.service`; not meant to be called by

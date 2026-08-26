@@ -490,3 +490,123 @@ pub fn cmd_logs(
         .collect();
     success(with_debug(json!({ "lines": log_lines }), dbg))
 }
+
+/// Lists the `scripts` entries of the app's `package.json`.
+///
+/// Read-only, and deliberately narrow. The file belongs to the account and is
+/// read after the privilege drop, so this can see exactly what the account can
+/// see — a symlink pointing elsewhere resolves with the account's rights, not
+/// root's.
+///
+/// Only the names reach the caller, never the command bodies. A script body is
+/// arbitrary shell written by the customer; echoing it into a web page invites
+/// the panel to render someone's `rm -rf` as if the panel endorsed it, and the
+/// panel has no reason to display it. Names are filtered to what npm can be
+/// asked to run without a shell reinterpreting it.
+pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
+    let Ok(meta) = load_app_meta(state_dir, name) else {
+        user_error("app_not_found", &format!("app '{name}' not found"));
+    };
+
+    if meta.app_type != "node" {
+        success(with_debug(
+            json!({ "scripts": Vec::<String>::new(), "reason": "not_node" }),
+            dbg,
+        ));
+    }
+
+    let pkg = PathBuf::from(&meta.cwd).join("package.json");
+    let Ok(raw) = std::fs::read_to_string(&pkg) else {
+        success(with_debug(
+            json!({ "scripts": Vec::<String>::new(), "reason": "no_package_json" }),
+            dbg,
+        ));
+    };
+
+    // A malformed package.json is the customer's to fix; say so instead of
+    // reporting "no scripts", which would read as if the file were fine.
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        success(with_debug(
+            json!({ "scripts": Vec::<String>::new(), "reason": "invalid_package_json" }),
+            dbg,
+        ));
+    };
+
+    let mut names: Vec<String> = parsed
+        .get("scripts")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.keys()
+                .filter(|k| is_safe_script_name(k))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+
+    success(with_debug(json!({ "scripts": names }), dbg));
+}
+
+/// Whether a `package.json` script name is safe to hand to `npm run`.
+///
+/// npm itself allows almost anything as a key. This is the boundary where a
+/// name stops being data and becomes part of a command, so it is kept to what
+/// cannot be mistaken for an option, a path or shell syntax: leading `-` would
+/// be read as a flag, and the rest keeps quoting and traversal out.
+fn is_safe_script_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-' | '.'))
+}
+
+#[cfg(test)]
+mod script_name_tests {
+    use super::is_safe_script_name;
+
+    #[test]
+    fn accepts_names_npm_projects_actually_use() {
+        for n in [
+            "start",
+            "build",
+            "test",
+            "dev",
+            "lint:fix",
+            "build_prod",
+            "db.migrate",
+            "pre-build",
+        ] {
+            assert!(is_safe_script_name(n), "{n} should be accepted");
+        }
+    }
+
+    /// The name is about to become part of a command line. These are the shapes
+    /// that stop being data at that point.
+    #[test]
+    fn refuses_names_that_would_leave_the_argument() {
+        for n in [
+            "",                 // nothing to run
+            "-x",               // reads as an option to npm
+            "--prefix",         // same, long form
+            "a b",              // splits into two arguments
+            "build; rm -rf /",  // command separator
+            "build && curl x",  // chaining
+            "build | sh",       // pipe
+            "$(id)",            // command substitution
+            "`id`",             // command substitution, backticks
+            "build\nrm",        // newline
+            "../../etc/passwd", // traversal
+            "a/b",              // path separator
+            "build'",           // quote
+        ] {
+            assert!(!is_safe_script_name(n), "{n:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn refuses_absurdly_long_names() {
+        assert!(!is_safe_script_name(&"a".repeat(65)));
+        assert!(is_safe_script_name(&"a".repeat(64)));
+    }
+}
