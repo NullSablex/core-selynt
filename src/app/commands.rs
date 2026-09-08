@@ -510,7 +510,7 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
 
     if meta.app_type != "node" {
         success(with_debug(
-            json!({ "scripts": Vec::<String>::new(), "reason": "not_node" }),
+            json!({ "scripts": Vec::<String>::new(), "deps": "unknown", "reason": "not_node" }),
             dbg,
         ));
     }
@@ -518,7 +518,7 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     let pkg = PathBuf::from(&meta.cwd).join("package.json");
     let Ok(raw) = std::fs::read_to_string(&pkg) else {
         success(with_debug(
-            json!({ "scripts": Vec::<String>::new(), "reason": "no_package_json" }),
+            json!({ "scripts": Vec::<String>::new(), "deps": "unknown", "reason": "no_package_json" }),
             dbg,
         ));
     };
@@ -527,7 +527,7 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     // reporting "no scripts", which would read as if the file were fine.
     let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
         success(with_debug(
-            json!({ "scripts": Vec::<String>::new(), "reason": "invalid_package_json" }),
+            json!({ "scripts": Vec::<String>::new(), "deps": "unknown", "reason": "invalid_package_json" }),
             dbg,
         ));
     };
@@ -544,7 +544,8 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
         .unwrap_or_default();
     names.sort();
 
-    success(with_debug(json!({ "scripts": names }), dbg));
+    let deps = dependency_state(Path::new(&meta.cwd), &parsed);
+    success(with_debug(json!({ "scripts": names, "deps": deps }), dbg));
 }
 
 /// Whether a `package.json` script name is safe to hand to `npm run`.
@@ -608,5 +609,179 @@ mod script_name_tests {
     fn refuses_absurdly_long_names() {
         assert!(!is_safe_script_name(&"a".repeat(65)));
         assert!(is_safe_script_name(&"a".repeat(64)));
+    }
+}
+
+/// State of the app's dependencies, decided without running npm.
+///
+/// `npm ls` would answer this too, but it needs npm on `PATH` — which under the
+/// panel's CGI does not carry `/usr/local/bin` — and costs a second. Comparing
+/// files is both faster and immune to the environment.
+///
+/// Deliberately not resolving semver ranges: whether `^2.1.3` is satisfied by
+/// what is on disk is npm's call, and guessing produces confident wrong answers.
+fn dependency_state(cwd: &Path, pkg: &Value) -> &'static str {
+    let declared: Vec<&String> = ["dependencies", "devDependencies"]
+        .iter()
+        .filter_map(|k| pkg.get(*k))
+        .filter_map(Value::as_object)
+        .flat_map(serde_json::Map::keys)
+        .collect();
+
+    if declared.is_empty() {
+        return "none";
+    }
+    if !cwd.join("node_modules").is_dir() {
+        return "missing";
+    }
+
+    // The lockfile names every directory that should exist. Without one there
+    // is nothing to compare against, so a present `node_modules` is taken at
+    // face value rather than reported as a problem that may not exist.
+    let Ok(raw) = std::fs::read_to_string(cwd.join("package-lock.json")) else {
+        return "ok";
+    };
+    let Ok(lock) = serde_json::from_str::<Value>(&raw) else {
+        return "ok";
+    };
+    let Some(entries) = lock.get("packages").and_then(Value::as_object) else {
+        return "ok";
+    };
+
+    let mut locked = Vec::new();
+    for path in entries.keys() {
+        let Some(rel) = path.strip_prefix("node_modules/") else {
+            continue;
+        };
+        locked.push(rel);
+        if !cwd.join(path).is_dir() {
+            return "incomplete";
+        }
+    }
+
+    if declared.iter().any(|d| !locked.contains(&d.as_str())) {
+        return "outdated";
+    }
+
+    "ok"
+}
+
+/// Why an argument typed in the panel must not reach a command line, or `None`.
+///
+/// Commands are built with `Command::new` and an argument array, never through
+/// a shell, so `;`, `&&` and `$(…)` are already inert — they arrive as literal
+/// characters in a single argument. This check is not about that.
+///
+/// It is about the two things an array cannot prevent:
+///
+/// - an argument that starts with `-` is read as an *option* by whatever runs,
+///   and `npm --prefix /elsewhere` or `node --experimental-…` change what the
+///   command does rather than what it operates on;
+/// - a path leaving the application, which the sandbox blocks at the mount
+///   level but which should never be composed in the first place.
+///
+/// Everything else is left alone: an argument is data the customer chose, and
+/// refusing legitimate values teaches people to work around the panel.
+///
+/// Written before the execution command that will call it: this is the boundary
+/// where a value stops being data, and it should exist — and be tested — before
+/// anything is able to run.
+#[allow(
+    dead_code,
+    reason = "boundary for the execution command, added first on purpose"
+)]
+pub fn argument_refusal(arg: &str) -> Option<String> {
+    if arg.is_empty() {
+        return None;
+    }
+    if arg.len() > 256 {
+        return Some("argument is too long".to_string());
+    }
+    if arg.chars().any(char::is_control) {
+        return Some("argument contains control characters".to_string());
+    }
+    if arg.starts_with('-') {
+        return Some(format!(
+            "argument {arg:?} would be read as an option; the panel only passes values"
+        ));
+    }
+    if arg.contains("..") || arg.starts_with('/') {
+        return Some(format!(
+            "argument {arg:?} points outside the application directory"
+        ));
+    }
+    None
+}
+
+/// Splits the argument string typed in the panel into individual arguments.
+///
+/// Whitespace-separated, with no quoting rules of its own. Supporting quotes
+/// here would mean reimplementing a shell parser — and a half-correct shell
+/// parser is exactly how arguments start meaning something the user did not
+/// write. Anyone needing that has SSH.
+#[allow(
+    dead_code,
+    reason = "boundary for the execution command, added first on purpose"
+)]
+pub fn split_arguments(raw: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for a in raw.split_whitespace() {
+        if let Some(err) = argument_refusal(a) {
+            return Err(err);
+        }
+        out.push(a.to_string());
+    }
+    if out.len() > 32 {
+        return Err("too many arguments".to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::{argument_refusal, split_arguments};
+
+    #[test]
+    fn accepts_plain_values() {
+        for a in ["production", "dist/index.js", "3000", "test.spec.ts"] {
+            assert!(argument_refusal(a).is_none(), "{a} should be accepted");
+        }
+    }
+
+    /// The panel passes values, not options: an argument that turns into a flag
+    /// changes what the command does.
+    #[test]
+    fn refuses_arguments_that_would_be_read_as_options() {
+        for a in ["-x", "--prefix", "--experimental-vm-modules", "-C"] {
+            assert!(argument_refusal(a).is_some(), "{a} should be refused");
+        }
+    }
+
+    #[test]
+    fn refuses_paths_leaving_the_application() {
+        for a in ["../secret", "/etc/passwd", "a/../../b"] {
+            assert!(argument_refusal(a).is_some(), "{a} should be refused");
+        }
+    }
+
+    /// Shell metacharacters are inert because nothing goes through a shell, but
+    /// they must not be silently dropped either: they arrive as one argument.
+    #[test]
+    fn shell_metacharacters_stay_a_single_literal_argument() {
+        let args = split_arguments("build;rm").unwrap();
+        assert_eq!(args, vec!["build;rm"]);
+    }
+
+    #[test]
+    fn splits_on_whitespace_and_refuses_the_bad_one() {
+        assert_eq!(split_arguments("a b c").unwrap(), vec!["a", "b", "c"]);
+        assert!(split_arguments("ok --evil").is_err());
+        assert!(split_arguments("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn refuses_absurd_counts_and_lengths() {
+        assert!(split_arguments(&"a ".repeat(33)).is_err());
+        assert!(argument_refusal(&"a".repeat(257)).is_some());
     }
 }
