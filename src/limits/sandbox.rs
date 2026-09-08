@@ -72,11 +72,25 @@ fn user_namespaces_enabled() -> bool {
 /// the rest of the account's home is left out of the mount namespace. A tmpfs
 /// would hide the neighbours too, but the socket created on it would exist only
 /// inside the namespace and the proxy could never reach it.
-pub fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
+/// Refuses instead of returning the command unwrapped: the panel ships its own
+/// bubblewrap, so a missing binary is a broken install, not a host that cannot
+/// isolate. Handing back a bare command would run outside the sandbox with
+/// nobody the wiser — and the callers that confine third-party code, like the
+/// npm commands, have no safe fallback to fall back to.
+pub fn wrap(cmd: &Command, app_dir: &Path, socket_dir: &Path) -> Command {
     let Some(bwrap) = bwrap_path() else {
-        return cmd;
+        crate::sys::output::system_error("sandbox_unavailable", unavailable_reason());
     };
+    wrap_with(&bwrap, cmd, app_dir, socket_dir)
+}
 
+/// Builds the wrapped command from a given `bwrap` path.
+///
+/// Split from [`wrap`] so the argument assembly can be tested without the
+/// binary installed: the tests used to skip themselves when `bwrap` was
+/// missing, which meant they passed vacuously on every machine that did not
+/// have the panel deployed — including CI.
+fn wrap_with(bwrap: &str, cmd: &Command, app_dir: &Path, socket_dir: &Path) -> Command {
     let mut run = Command::new(bwrap);
 
     for p in SYSTEM_PATHS {
@@ -121,20 +135,22 @@ pub fn wrap(cmd: Command, app_dir: &Path, socket_dir: &Path) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::wrap_with;
+
+    /// Caminho fictício: o que se testa aqui é a montagem dos argumentos, não a
+    /// presença do binário. Antes os testes se pulavam quando o bwrap faltava,
+    /// e passavam sem verificar nada em toda máquina sem o painel instalado.
+    const BWRAP: &str = "/opt/bwrap";
     use std::path::Path;
     use std::process::Command;
 
     /// The wrapper must not lose the program it was asked to run.
     #[test]
     fn keeps_program_and_args() {
-        if super::bwrap_path().is_none() {
-            return;
-        }
         let mut inner = Command::new("/usr/local/bin/node");
         inner.arg("--import").arg("/x/loader.js").arg("/app/i.js");
 
-        let wrapped = wrap(inner, Path::new("/app"), Path::new("/sock"));
+        let wrapped = wrap_with(BWRAP, &inner, Path::new("/app"), Path::new("/sock"));
         let args: Vec<String> = wrapped
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -148,13 +164,10 @@ mod tests {
     /// Environment is what carries `SELYNT_SOCKET` to the app.
     #[test]
     fn carries_environment_over() {
-        if super::bwrap_path().is_none() {
-            return;
-        }
         let mut inner = Command::new("/bin/true");
         inner.env("SELYNT_SOCKET", "/sock/app.sock");
 
-        let wrapped = wrap(inner, Path::new("/app"), Path::new("/sock"));
+        let wrapped = wrap_with(BWRAP, &inner, Path::new("/app"), Path::new("/sock"));
         let found = wrapped
             .get_envs()
             .any(|(k, v)| k == "SELYNT_SOCKET" && v == Some("/sock/app.sock".as_ref()));
@@ -165,11 +178,9 @@ mod tests {
     /// ever bound read-write.
     #[test]
     fn binds_only_the_apps_own_directory() {
-        if super::bwrap_path().is_none() {
-            return;
-        }
-        let wrapped = wrap(
-            Command::new("/bin/true"),
+        let wrapped = wrap_with(
+            BWRAP,
+            &Command::new("/bin/true"),
             Path::new("/home/bob/apps/api"),
             Path::new("/state/bob/.sockets/api"),
         );

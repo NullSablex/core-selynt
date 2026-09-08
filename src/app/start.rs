@@ -273,7 +273,7 @@ fn apply_sandbox(cmd: Command, isolated: bool, cwd: &Path, socket_path: &Path) -
             crate::limits::sandbox::unavailable_reason(),
         );
     }
-    crate::limits::sandbox::wrap(cmd, cwd, socket_dir)
+    crate::limits::sandbox::wrap(&cmd, cwd, socket_dir)
 }
 
 fn spawn_app(
