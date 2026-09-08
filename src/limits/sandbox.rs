@@ -9,17 +9,29 @@
 //! cgroup for the memory limits and the netguard sweep to keep working.
 
 use std::path::Path;
+
+use crate::sys::state::PLUGIN_PATH;
 use std::process::Command;
 
 /// Read-only system paths an app needs to run at all: the interpreter, shared
 /// libraries and the resolver's configuration.
 const SYSTEM_PATHS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
 
+/// The bubblewrap shipped with the panel.
+///
+/// Deliberately not the system's: distributions lag badly — Alma Linux 9 still
+/// ships 0.6.3 — and the sandbox has to behave the same on every server the
+/// panel runs on. The release builds this binary from a pinned commit, so what
+/// confines an app here confines it everywhere.
+pub fn bwrap_bin() -> String {
+    format!("{PLUGIN_PATH}/bin/bwrap")
+}
+
 /// Whether this host can isolate apps.
 ///
-/// Bubblewrap is packaged on the distributions the panel targets but is not
-/// universally installed, and unprivileged namespaces can be disabled outright.
-/// Callers fall back to running the app unisolated.
+/// Unprivileged namespaces can be disabled outright by the kernel, and the
+/// binary can be missing from a partial install; callers fall back to running
+/// the app unisolated.
 pub fn available() -> bool {
     bwrap_path().is_some() && user_namespaces_enabled()
 }
@@ -38,10 +50,12 @@ pub fn unavailable_reason() -> &'static str {
     }
 }
 
-fn bwrap_path() -> Option<&'static str> {
-    ["/usr/bin/bwrap", "/bin/bwrap"]
-        .into_iter()
-        .find(|p| Path::new(p).is_file())
+/// Only the bundled binary. Falling back to the system's would mean the sandbox
+/// silently changing behaviour with the distribution's version — including
+/// versions old enough to predate fixes this one already carries.
+fn bwrap_path() -> Option<String> {
+    let p = bwrap_bin();
+    Path::new(&p).is_file().then_some(p)
 }
 
 /// `user.max_user_namespaces` at 0 means the kernel refuses to create one.
