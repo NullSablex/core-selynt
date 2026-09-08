@@ -39,6 +39,50 @@ jobs:
       - name: Build (musl static)
         run: cargo build --release --target x86_64-unknown-linux-musl
 
+      # O painel confina a execução de comandos das aplicações com o bubblewrap,
+      # e distribui o próprio binário em vez de usar o do sistema: a versão da
+      # distribuição costuma ficar para trás (AlmaLinux 9 entrega 0.6.3) e o
+      # comportamento do sandbox precisa ser o mesmo em todo servidor.
+      #
+      # Fixado por SHA de commit, não por tag: uma tag pode ser reapontada para
+      # outro commit, um SHA não. `BWRAP_VERSION` existe só para nomear o que
+      # esse commit é.
+      - name: Build bubblewrap (static)
+        env:
+          BWRAP_VERSION: 0.11.2
+          BWRAP_COMMIT: 1b80120ef26a28e065e67f89bfef873f13bdd317
+        run: |
+          set -eu
+          sudo apt-get install -y meson ninja-build libcap-dev
+
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/containers/bubblewrap.git bwrap-src
+          cd bwrap-src
+          git checkout --quiet "$BWRAP_COMMIT"
+
+          # O commit tem de ser o que a release nomeia; um clone adulterado ou um
+          # SHA trocado por engano para aqui, e não no servidor do cliente.
+          test "$(git rev-parse HEAD)" = "$BWRAP_COMMIT"
+          grep -q "version : '$BWRAP_VERSION'" meson.build
+
+          # Estático para não depender das libs do host: o binário roda em
+          # qualquer distro que o plugin suporte. Sem selinux, que é opcional e
+          # traria dependência dinâmica de volta.
+          meson setup build \
+            -Dselinux=disabled -Dman=disabled -Dtests=false \
+            -Dbash_completion=disabled -Dbuildtype=release \
+            -Dc_link_args="-static" -Ddefault_library=static --prefer-static
+          ninja -C build
+
+          # Sem isto o binário pode sair dinâmico sem ninguém perceber, e só
+          # falharia num servidor com libc diferente.
+          file build/bwrap | grep -q 'statically linked'
+          ! ldd build/bwrap 2>/dev/null | grep -q '=>'
+
+          cp build/bwrap "$GITHUB_WORKSPACE/bwrap"
+          cd "$GITHUB_WORKSPACE"
+          ./bwrap --version
+
       - name: Detect pre-release
         id: prerelease
         run: |
@@ -53,5 +97,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
-          files: target/x86_64-unknown-linux-musl/release/core-selynt
+          files: |
+            target/x86_64-unknown-linux-musl/release/core-selynt
+            bwrap
           generate_release_notes: true

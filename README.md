@@ -225,6 +225,17 @@ Falha de segurança **não** vai em issue pública: use o
 [relato privado](https://github.com/NullSablex/core-selynt/security/advisories/new),
 como descrito no [SECURITY.md](SECURITY.md).
 
+## Componentes de terceiros
+
+O release deste repositório publica, junto do `core-selynt`, o executável
+`bwrap` ([Bubblewrap](https://github.com/containers/bubblewrap) 0.11.2,
+LGPL-2.0-or-later), usado para confinar a execução de comandos das aplicações.
+
+É compilado sem modificações a partir do
+[commit oficial](https://github.com/containers/bubblewrap/tree/1b80120ef26a28e065e67f89bfef873f13bdd317)
+— fixado por SHA, não por tag — e invocado como processo externo, sem vínculo
+com o código deste projeto. Licença e detalhes em [`LICENSES/`](LICENSES/).
+
 ## Licença
 
 Copyright © 2026 [NullSablex](https://github.com/NullSablex). Licenciado sob a [GNU AGPL-3.0-or-later](LICENSE).
