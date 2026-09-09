@@ -216,31 +216,69 @@ pub(super) fn scaffold_node_entry(entry_path: &Path, name: &str) {
             .unwrap_or(""),
     );
 
-    // O `package.json` acompanha o arquivo de entrada. Uma aplicação Node sem
-    // ele não é uma aplicação Node: `npm install` não sabe o que instalar,
-    // nenhum script pode ser declarado, e o painel não tem o que oferecer. Antes
-    // o cliente precisava criá-lo por FTP para usar qualquer coisa de npm — e
-    // quem não tem SSH costuma não saber que precisava.
-    //
-    // O template declara `type: module` porque o `index.js` que vai junto usa
-    // `import`; sem isso o Node recusa o arquivo que o próprio painel escreveu.
-    //
-    // E não traz um script `start`: o painel não sobe a aplicação por
-    // `npm start`, e sim com `node --import <loader> <entry>`. O loader é o que
-    // força o bind no socket Unix; um `start` no `package.json` daria ao cliente
-    // um botão que roda a aplicação sem ele, tentando abrir porta TCP — que a
-    // varredura de portas então derruba. Melhor não oferecer o atalho errado.
-    if let Some(dir) = entry_path.parent() {
-        write_template(
-            &plugin_dir.join("templates/node/package.json"),
-            &dir.join("package.json"),
-            name,
-            entry_path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(""),
-        );
+    scaffold_package_json(entry_path, name);
+}
+
+/// Roda `npm init` no diretório da aplicação, quando ainda não há
+/// `package.json`.
+///
+/// Uma aplicação Node sem ele não é uma aplicação Node: `npm install` não sabe
+/// o que instalar, nenhum script pode ser declarado, e o painel não tem o que
+/// oferecer. Antes o cliente precisava criá-lo por FTP — e quem não tem SSH
+/// costuma não saber que precisava.
+///
+/// É o `npm init` de verdade, e o resultado dele é o que fica. O painel não
+/// escolhe entre `commonjs` e ESM, nem entre JavaScript e TypeScript: isso é
+/// decisão de quem escreve a aplicação, e impor um formato no arquivo inicial
+/// seria decidir por ele.
+///
+/// A única remoção é o `scripts.test` que o `npm init` deixa — um script que só
+/// existe para falhar, e que apareceria na tela de scripts como se fosse algo
+/// a executar.
+///
+/// Falha em silêncio: sem npm no servidor a aplicação continua utilizável, só
+/// sem o arquivo — recusar a criação por causa disso seria pior.
+fn scaffold_package_json(entry_path: &Path, name: &str) {
+    let Some(dir) = entry_path.parent() else {
+        return;
+    };
+    if dir.join("package.json").exists() {
+        return;
     }
+
+    let Some(npm) = npm_path() else {
+        return;
+    };
+    let run = |args: &[&str]| {
+        std::process::Command::new(&npm)
+            .args(args)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    };
+
+    // O nome vem do diretório, que é o nome da aplicação.
+    let _ = run(&["init", "-y"]);
+    if !dir.join("package.json").exists() {
+        return;
+    }
+    let _ = run(&["pkg", "delete", "scripts.test"]);
+
+    // `main` aponta para a entrada que a aplicação realmente tem; o `npm init`
+    // chuta `index.js` porque não sabe qual é.
+    if let Some(entry) = entry_path.file_name().and_then(|f| f.to_str()) {
+        let _ = run(&["pkg", "set", &format!("main={entry}")]);
+    }
+    let _ = name;
+}
+
+/// O `npm` da mesma instalação do `node` que a detecção conhece.
+fn npm_path() -> Option<PathBuf> {
+    let node = crate::runtime::detect::default_node_path()?;
+    let npm = Path::new(&node).parent()?.join("npm");
+    npm.is_file().then_some(npm)
 }
 
 /// O diretório do plugin, deduzido de onde o binário está.
