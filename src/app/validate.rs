@@ -203,19 +203,67 @@ pub(super) fn validate_rust_entry(entry_path: &Path) {
 /// Drops a Node.js scaffold template at `entry_path` when the file is missing
 /// and the plugin ships a template at `{plugin}/templates/node/index.js`.
 pub(super) fn scaffold_node_entry(entry_path: &Path, name: &str) {
-    if entry_path.exists() {
+    let Some(plugin_dir) = plugin_dir() else {
+        return;
+    };
+    write_template(
+        &plugin_dir.join("templates/node/index.js"),
+        entry_path,
+        name,
+        entry_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(""),
+    );
+
+    // O `package.json` acompanha o arquivo de entrada. Uma aplicação Node sem
+    // ele não é uma aplicação Node: `npm install` não sabe o que instalar,
+    // nenhum script pode ser declarado, e o painel não tem o que oferecer. Antes
+    // o cliente precisava criá-lo por FTP para usar qualquer coisa de npm — e
+    // quem não tem SSH costuma não saber que precisava.
+    //
+    // O template declara `type: module` porque o `index.js` que vai junto usa
+    // `import`; sem isso o Node recusa o arquivo que o próprio painel escreveu.
+    //
+    // E não traz um script `start`: o painel não sobe a aplicação por
+    // `npm start`, e sim com `node --import <loader> <entry>`. O loader é o que
+    // força o bind no socket Unix; um `start` no `package.json` daria ao cliente
+    // um botão que roda a aplicação sem ele, tentando abrir porta TCP — que a
+    // varredura de portas então derruba. Melhor não oferecer o atalho errado.
+    if let Some(dir) = entry_path.parent() {
+        write_template(
+            &plugin_dir.join("templates/node/package.json"),
+            &dir.join("package.json"),
+            name,
+            entry_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(""),
+        );
+    }
+}
+
+/// O diretório do plugin, deduzido de onde o binário está.
+fn plugin_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().and_then(Path::parent).map(Path::to_path_buf))
+}
+
+/// Escreve um template, se o destino ainda não existe.
+///
+/// Nunca sobrescreve: o cliente pode ter criado o arquivo antes de registrar a
+/// aplicação, e um `package.json` com as dependências dele não pode ser trocado
+/// por um vazio.
+fn write_template(template: &Path, destino: &Path, name: &str, entry: &str) {
+    if destino.exists() {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(plugin_dir) = exe.parent().and_then(Path::parent) else {
-        return;
-    };
-    let template = plugin_dir.join("templates/node/index.js");
-    if let Ok(tpl) = std::fs::read_to_string(&template) {
-        let rendered = tpl.replace("{{APP_NAME}}", name);
-        let _ = std::fs::write(entry_path, rendered.as_bytes());
+    if let Ok(tpl) = std::fs::read_to_string(template) {
+        let rendered = tpl
+            .replace("{{APP_NAME}}", name)
+            .replace("{{APP_ENTRY}}", entry);
+        let _ = std::fs::write(destino, rendered.as_bytes());
     }
 }
 
