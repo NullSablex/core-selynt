@@ -84,6 +84,65 @@ pub fn wrap(cmd: &Command, app_dir: &Path, socket_dir: &Path) -> Command {
     wrap_with(&bwrap, cmd, app_dir, socket_dir)
 }
 
+/// Confines a one-off command to the application's own directory.
+///
+/// Unlike [`wrap`], no socket directory: a command that installs dependencies or
+/// runs a build has nothing to serve, and binding the socket directory would
+/// hand it a path it has no business touching.
+///
+/// This is what makes running third-party code from the panel acceptable — a
+/// `postinstall` here cannot read the neighbour app's `.env`, because the
+/// neighbour is not in the mount namespace at all.
+pub fn wrap_command(cmd: &Command, app_dir: &Path) -> Command {
+    let Some(bwrap) = bwrap_path() else {
+        crate::sys::output::system_error("sandbox_unavailable", unavailable_reason());
+    };
+    wrap_command_with(&bwrap, cmd, app_dir)
+}
+
+/// Como [`wrap_command`], com o caminho do bwrap dado — para poder ser testado
+/// sem o binário instalado.
+pub fn wrap_command_with(bwrap: &str, cmd: &Command, app_dir: &Path) -> Command {
+    let mut run = Command::new(bwrap);
+    for p in SYSTEM_PATHS {
+        if Path::new(p).exists() {
+            run.arg("--ro-bind").arg(p).arg(p);
+        }
+    }
+    run.arg("--bind").arg(app_dir).arg(app_dir);
+    run.arg("--proc")
+        .arg("/proc")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--tmpfs")
+        .arg("/tmp")
+        // Esconde os processos do host: sem isto o comando enxerga a lista
+        // inteira da máquina, incluindo linhas de comando de outras contas.
+        .arg("--unshare-pid")
+        // O job é filho do processo que o lançou e não deve sobreviver a ele,
+        // ao contrário da aplicação, que é destacada de propósito.
+        .arg("--die-with-parent");
+
+    run.arg(cmd.get_program());
+    for a in cmd.get_args() {
+        run.arg(a);
+    }
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => {
+                run.env(k, v);
+            }
+            None => {
+                run.env_remove(k);
+            }
+        }
+    }
+    if let Some(dir) = cmd.get_current_dir() {
+        run.current_dir(dir);
+    }
+    run
+}
+
 /// Builds the wrapped command from a given `bwrap` path.
 ///
 /// Split from [`wrap`] so the argument assembly can be tested without the

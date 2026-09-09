@@ -77,6 +77,25 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
 
         // Reads package.json as the account, after the drop: a symlink out of
         // the home resolves with the account's rights, never root's.
+        // Do lado da conta: o que instala as dependências e o que as executa
+        // têm de ser o mesmo usuário, senão os arquivos saem com dono errado.
+        Commands::RunJob {
+            name,
+            command,
+            script,
+            args,
+        } => {
+            let (sd, d) = (state_dir, dbg);
+            Box::new(move || {
+                app::job::cmd_run_job(&sd, &name, &command, &script, &args, gid, d.as_ref())
+            })
+        }
+
+        Commands::JobStatus { name } => {
+            let (sd, d) = (state_dir, dbg);
+            Box::new(move || app::job::cmd_job_status(&sd, &name, d.as_ref()))
+        }
+
         Commands::Scripts { name } => {
             let (sd, d) = (state_dir, dbg);
             Box::new(move || app::commands::cmd_scripts(&sd, &name, d.as_ref()))

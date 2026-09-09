@@ -4,6 +4,7 @@
 pub mod appfile;
 pub mod boot;
 pub mod commands;
+pub mod job;
 pub mod logs;
 pub mod start;
 pub mod validate;

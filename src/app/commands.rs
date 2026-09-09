@@ -375,7 +375,9 @@ fn remove_run_state(state_dir: &Path, name: &str, meta: &AppMeta) {
     let active_socket = crate::sys::state::active_socket_path(state_dir, meta);
 
     let run_dir = state_dir.join(".run");
-    for ext in &["pid", "meta", "enabled"] {
+    // `job` e `job.log` guardam a última execução npm: sem removê-los aqui, um
+    // app recriado com o mesmo nome herdaria o resultado do anterior.
+    for ext in &["pid", "meta", "enabled", "job", "job.log"] {
         let _ = std::fs::remove_file(run_dir.join(format!("{name}.{ext}")));
     }
 
@@ -554,7 +556,7 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
 /// name stops being data and becomes part of a command, so it is kept to what
 /// cannot be mistaken for an option, a path or shell syntax: leading `-` would
 /// be read as a flag, and the rest keeps quoting and traversal out.
-fn is_safe_script_name(s: &str) -> bool {
+pub(super) fn is_safe_script_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && !s.starts_with('-')

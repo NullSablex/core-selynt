@@ -113,6 +113,25 @@ enum Commands {
     /// and the panel has no reason to render it.
     Scripts { name: String },
 
+    /// Runs an npm command for the app, confined to its own directory.
+    ///
+    /// `install`, `update` and `ci` require the app stopped: rewriting
+    /// `node_modules` under a running process breaks it without a clear error.
+    RunJob {
+        name: String,
+        /// `install`, `update`, `ci` or `run`.
+        command: String,
+        /// Script name, for `run`.
+        #[arg(long, default_value = "")]
+        script: String,
+        /// Extra arguments, passed after `--`.
+        #[arg(long, default_value = "")]
+        args: String,
+    },
+
+    /// Reports the state of the app's last npm command.
+    JobStatus { name: String },
+
     /// Restarts every enabled app of every account, after a reboot.
     ///
     /// Runs as root from `selynt-panel.service`; not meant to be called by
