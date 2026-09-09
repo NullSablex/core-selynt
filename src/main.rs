@@ -132,6 +132,9 @@ enum Commands {
     /// Reports the state of the app's last npm command.
     JobStatus { name: String },
 
+    /// Interrupts the running npm command, as Ctrl+C would.
+    StopJob { name: String },
+
     /// Restarts every enabled app of every account, after a reboot.
     ///
     /// Runs as root from `selynt-panel.service`; not meant to be called by

@@ -91,6 +91,11 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
             })
         }
 
+        Commands::StopJob { name } => {
+            let (sd, d) = (state_dir, dbg);
+            Box::new(move || app::job::cmd_stop_job(&sd, &name, gid, d.as_ref()))
+        }
+
         Commands::JobStatus { name } => {
             let (sd, d) = (state_dir, dbg);
             Box::new(move || app::job::cmd_job_status(&sd, &name, d.as_ref()))

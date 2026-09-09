@@ -157,6 +157,62 @@ fn build_inner(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Com
 /// quem desenvolve nem na CI. Sem esta separação os testes do npm não teriam
 /// como rodar, e a alternativa (pular quando falta o binário) já se mostrou
 /// pior: eles passariam sem verificar nada.
+/// Interrompe o comando em execução.
+///
+/// Envia `SIGINT` — o mesmo que o Ctrl+C de um terminal —, que é o sinal que o
+/// npm e as ferramentas de build sabem tratar: elas limpam o que estavam
+/// escrevendo antes de sair. Só depois, se o processo insistir, vem o
+/// `SIGKILL`, que não dá essa chance e pode deixar `node_modules` pela metade.
+///
+/// O sinal vai para o **grupo** de processos, não só para o líder: o npm
+/// delega a outros processos, e matar apenas o pai deixaria os filhos rodando.
+pub fn cmd_stop_job(state_dir: &Path, app: &str, gid: u32, dbg: Option<&Value>) -> ! {
+    if load_app_meta(state_dir, app).is_err() {
+        user_error("app_not_found", &format!("app '{app}' not found"));
+    }
+    let paths = Paths::new(state_dir, app);
+
+    let Ok(raw) = std::fs::read_to_string(&paths.state) else {
+        user_error("no_job", "no command is running");
+    };
+    let Ok(estado) = serde_json::from_str::<Value>(&raw) else {
+        user_error("no_job", "no command is running");
+    };
+    if estado.get("status").and_then(Value::as_str) != Some("running") {
+        user_error("no_job", "no command is running");
+    }
+    let Some(pid) = estado.get("pid").and_then(Value::as_u64) else {
+        user_error("no_job", "the running command has no process to stop");
+    };
+
+    let alvo = nix::unistd::Pid::from_raw(-(i32::try_from(pid).unwrap_or(0)));
+    let _ = nix::sys::signal::kill(alvo, nix::sys::signal::Signal::SIGINT);
+
+    // Dá tempo de encerrar por conta própria antes de insistir.
+    for _ in 0..25 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if !crate::sys::proc::is_process_alive(u32::try_from(pid).unwrap_or(0)) {
+            break;
+        }
+    }
+    if crate::sys::proc::is_process_alive(u32::try_from(pid).unwrap_or(0)) {
+        let _ = nix::sys::signal::kill(alvo, nix::sys::signal::Signal::SIGKILL);
+    }
+
+    write_state(
+        &paths,
+        gid,
+        &json!({
+            "status": "stopped",
+            "command": estado.get("command").and_then(Value::as_str).unwrap_or(""),
+            "started_at": estado.get("started_at").and_then(Value::as_u64).unwrap_or(0),
+            "finished_at": now_secs(),
+        }),
+    );
+
+    success(with_debug(json!({ "stopped": true }), dbg));
+}
+
 #[cfg(test)]
 fn build_npm_command(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Command {
     build_inner(meta, kind, script, args)
@@ -175,6 +231,8 @@ fn write_state(paths: &Paths, gid: u32, state: &Value) {
 }
 
 /// Executa o comando e devolve `(código de saída, encerrado por tempo)`.
+///
+/// Chamado no processo filho, depois do fork: aqui a espera não prende ninguém.
 fn run_to_completion(mut cmd: Command, log: &Path) -> (i32, bool) {
     let Ok(file) = std::fs::File::create(log) else {
         return (-1, false);
@@ -284,6 +342,48 @@ pub fn cmd_run_job(
     );
 
     let cmd = build_command(&meta, kind, script, &args);
+
+    // O comando roda desprendido da requisição. Um `npm install` grande passa
+    // do timeout do CGI com folga, e prender a resposta a ele significaria a
+    // página perder a execução no meio — exatamente o que o painel do
+    // concorrente faz e que este desenho existe para evitar. Quem quer saber
+    // como terminou consulta `job-status`.
+    // `fork` é unsafe porque o filho herda o estado da memória e só pode chamar
+    // funções async-signal-safe até o exec. Aqui é seguro: nada de threads (o
+    // binário é single-threaded), e o filho vai direto para `setsid` e `spawn`,
+    // sem alocar nem tocar em estado compartilhado.
+    match unsafe { nix::unistd::fork() } {
+        Ok(nix::unistd::ForkResult::Parent { .. }) => {
+            success(with_debug(
+                json!({ "status": "running", "command": rotulo }),
+                dbg,
+            ));
+        }
+        Ok(nix::unistd::ForkResult::Child) => {}
+        Err(e) => {
+            user_error("fork_failed", &format!("could not start the command: {e}"));
+        }
+    }
+
+    // Daqui para baixo é o filho. Nova sessão, para não morrer junto com o
+    // processo que atendeu a requisição — e para ser o líder do grupo, de modo
+    // que a interrupção alcance o npm e tudo o que ele criou.
+    let _ = nix::unistd::setsid();
+
+    // O PID vai para o estado: é por ele que `stop-job` encontra o que
+    // interromper. Gravado antes de começar, senão um comando que trava logo no
+    // início ficaria sem como ser parado.
+    write_state(
+        &paths,
+        gid,
+        &json!({
+            "status": "running",
+            "command": rotulo,
+            "started_at": inicio,
+            "pid": std::process::id(),
+        }),
+    );
+
     let (code, timed_out) = run_to_completion(cmd, &paths.log);
 
     let status = if timed_out {
@@ -305,10 +405,8 @@ pub fn cmd_run_job(
         }),
     );
 
-    success(with_debug(
-        json!({ "status": status, "command": rotulo, "exit_code": code }),
-        dbg,
-    ));
+    // O filho não responde ao painel: quem perguntou já recebeu "running".
+    std::process::exit(0);
 }
 
 fn now_secs() -> u64 {
