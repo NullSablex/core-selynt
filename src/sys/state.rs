@@ -159,12 +159,30 @@ pub fn account_is_isolated(state_dir: &Path) -> bool {
         // No choice recorded for this account: fall back to the server-wide
         // default the admin set, so accounts that predate the setting behave as
         // decided without being touched one by one.
+        //
+        // With no default recorded either, isolation is **on**. It used to be
+        // off, and for a reason that no longer holds: bubblewrap came from the
+        // distribution and could simply be missing, so defaulting to on would
+        // have refused to start apps on hosts that never had it. The panel now
+        // ships its own binary, so the sandbox is there whenever the plugin is.
+        //
+        // Off by default meant every account paid nothing for isolation and got
+        // none of it — an app reading its neighbour's `.env` was the norm, not
+        // the exception.
         |_| {
-            std::fs::read_to_string(format!("{PLUGIN_PATH}/etc/default_isolated"))
-                .is_ok_and(|v| v.trim() == "1")
+            server_default_isolated(
+                std::fs::read_to_string(format!("{PLUGIN_PATH}/etc/default_isolated")).ok(),
+            )
         },
         |v| v.trim() == "1",
     )
+}
+
+/// O padrão do servidor, a partir do conteúdo de `etc/default_isolated`.
+///
+/// Separado para poder ser testado sem escrever no diretório do plugin.
+fn server_default_isolated(conteudo: Option<String>) -> bool {
+    conteudo.is_none_or(|v| v.trim() == "1")
 }
 
 /// The socket path a running app actually has, recorded when it started.
@@ -277,4 +295,34 @@ pub fn get_web_user() -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod default_isolated_tests {
+    use super::server_default_isolated;
+
+    /// Sem nada configurado, o isolamento vale. Foi uma inversão deliberada: só
+    /// passou a ser possível quando o painel passou a distribuir o próprio
+    /// bubblewrap, e antes disso ligar por padrão teria recusado iniciar
+    /// aplicações em servidores sem o pacote da distribuição.
+    #[test]
+    fn isolation_is_on_when_nothing_was_configured() {
+        assert!(server_default_isolated(None));
+    }
+
+    #[test]
+    fn the_admin_choice_wins_in_both_directions() {
+        assert!(server_default_isolated(Some("1".to_string())));
+        assert!(!server_default_isolated(Some("0".to_string())));
+        assert!(server_default_isolated(Some("1\n".to_string())));
+        assert!(!server_default_isolated(Some("0\n".to_string())));
+    }
+
+    /// Um arquivo vazio ou corrompido não pode ligar o isolamento por engano:
+    /// só o `1` explícito conta como escolha por ligar.
+    #[test]
+    fn only_an_explicit_one_counts_as_enabled() {
+        assert!(!server_default_isolated(Some(String::new())));
+        assert!(!server_default_isolated(Some("lixo".to_string())));
+    }
 }
