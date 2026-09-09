@@ -218,6 +218,23 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
             let (sd, d) = (state_dir, dbg);
             Box::new(move || app::commands::cmd_remove(&sd, &name, delete_dir, meta, d.as_ref()))
         }
+        // Valida antes de gravar. O prelúdio roda como root e escreve o `.app`;
+        // recusar só depois, no corpo do comando, deixaria a aplicação apontando
+        // para um arquivo que não existe — foi assim que um `cwd` recusado já
+        // chegou a ficar registrado.
+        Commands::SetEntry { name, entry } => {
+            if let Err((code, msg)) = app::commands::entry_refusal(&state_dir, &name, &entry) {
+                sys::output::user_error(&code, &msg);
+            }
+            if let Err((code, msg)) =
+                app::appfile::update_key(&state_dir, &name, "entry", &entry, gid)
+            {
+                sys::output::user_error(&code, &msg);
+            }
+            let (sd, d) = (state_dir, dbg);
+            Box::new(move || app::commands::cmd_set_entry(&sd, &name, &entry, d.as_ref()))
+        }
+
         Commands::SetNodeVersion { name, node_version } => {
             if let Err((code, msg)) =
                 app::appfile::update_key(&state_dir, &name, "node_version", &node_version, gid)

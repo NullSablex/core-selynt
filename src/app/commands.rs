@@ -272,6 +272,61 @@ pub fn cmd_set_isolated(isolated: bool, switch: &IsolationSwitch, dbg: Option<&V
     ))
 }
 
+/// Por que o `entry` não pode ser aceito, ou `Ok(())`.
+///
+/// Usada pelo prelúdio root *antes* de gravar o `.app` e pelo comando depois da
+/// queda de privilégio: uma regra só, para os dois lados não discordarem sobre
+/// o que é aceitável.
+pub fn entry_refusal(state_dir: &Path, name: &str, entry: &str) -> Result<(), (String, String)> {
+    let Ok(meta) = load_app_meta(state_dir, name) else {
+        return Err(("app_not_found".into(), format!("app '{name}' not found")));
+    };
+    if !super::validate_safe_component(entry) {
+        return Err((
+            "invalid_entry".into(),
+            "entry must not contain '/', '..' or null bytes".into(),
+        ));
+    }
+    // Apontar para um arquivo inexistente deixaria a aplicação sem subir, e o
+    // erro só apareceria no próximo start — longe de onde a escolha foi feita.
+    if !PathBuf::from(&meta.cwd).join(entry).is_file() {
+        return Err((
+            "entry_not_found".into(),
+            format!("file '{entry}' not found in the application directory"),
+        ));
+    }
+    Ok(())
+}
+
+/// Troca o arquivo de entrada da aplicação.
+///
+/// O `entry` era decidido na criação e ficava assim para sempre: quem escolheu
+/// `index.js` e depois migrou para `app.mjs`, ou de JavaScript para TypeScript,
+/// não tinha como dizer isso ao painel — só recriando a aplicação.
+///
+/// Recusa arquivo que não existe. O caminho é resolvido dentro do diretório da
+/// aplicação, e a validação é a mesma do `add`: sem `/`, sem `..`, sem bytes
+/// nulos — o valor vai para o `.app`, que é lido linha a linha, e uma quebra de
+/// linha ali forjaria outras chaves.
+pub fn cmd_set_entry(state_dir: &Path, name: &str, entry: &str, dbg: Option<&Value>) -> ! {
+    // Já recusado no prelúdio, antes da gravação; repetido aqui porque o comando
+    // não pode depender de quem o chamou ter feito a verificação.
+    if let Err((code, msg)) = entry_refusal(state_dir, name, entry) {
+        user_error(&code, &msg);
+    }
+
+    // Escrito pelo prelúdio root — a conta não altera o `.app` por conta própria.
+
+    // O processo em execução continua com o arquivo antigo até reiniciar.
+    let (status, _, _) = get_status(state_dir, name);
+    let restart_required = status == "RUNNING";
+
+    success(with_debug(
+        json!({ "entry": entry, "restart_required": restart_required }),
+        dbg,
+    ));
+}
+
 pub fn cmd_set_node_version(
     state_dir: &Path,
     name: &str,

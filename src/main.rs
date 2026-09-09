@@ -93,6 +93,17 @@ enum Commands {
         node_version: String,
     },
 
+    /// Changes the app's entry file.
+    ///
+    /// The file must already exist in the application directory: pointing at
+    /// something missing would only fail on the next start.
+    SetEntry {
+        name: String,
+        /// File name inside the application directory (e.g. `app.mjs`).
+        #[arg(long)]
+        entry: String,
+    },
+
     /// Prints the last lines of an app's log.
     Logs {
         name: String,
