@@ -366,10 +366,45 @@ fn check_runtimes(r: &mut Report) {
     }
 }
 
+/// Confere o bubblewrap que o painel distribui.
+///
+/// Sem ele nada de npm executa e nenhuma aplicação isolada sobe — e, como o
+/// isolamento é o padrão, isso é a maioria delas. Antes deste check a ausência
+/// só aparecia quando alguém tentava executar algo, com um erro que não dizia
+/// que faltava um arquivo da instalação.
+///
+/// Reporta a versão porque o binário é nosso, fixado por SHA no release: saber
+/// qual está instalado é o que distingue uma instalação completa de uma que
+/// ficou para trás.
+fn check_sandbox(r: &mut Report) {
+    let bwrap = Path::new(PLUGIN_PATH).join("bin/bwrap");
+    if !bwrap.is_file() {
+        r.add(Level::Fail, "install", "sandbox_missing", None);
+        return;
+    }
+
+    // Namespaces desligados no kernel deixam o binário presente e inútil; são
+    // causas diferentes e o admin resolve cada uma de um jeito.
+    if !crate::limits::sandbox::available() {
+        r.add(Level::Fail, "install", "sandbox_unavailable", None);
+        return;
+    }
+
+    let versao = std::process::Command::new(&bwrap)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|v| v.trim().replace("bubblewrap ", ""));
+
+    r.add(Level::Pass, "install", "sandbox_ok", versao.as_deref());
+}
+
 /// Runs every check and returns the report plus a summary.
 pub fn run_diagnostic() -> Value {
     let mut r = Report::new();
     check_binary(&mut r);
+    check_sandbox(&mut r);
     check_ownership_and_modes(&mut r);
     check_identity_files(&mut r);
     check_state_dir(&mut r);
