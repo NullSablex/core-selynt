@@ -98,6 +98,71 @@ correção.
 
 ### Added
 
+**Execução de comandos npm pelo painel**
+- `run-job` executa `install`, `update`, `ci` e os scripts declarados no
+  `package.json`; `job-status` devolve estado e log; `stop-job` interrompe.
+  Quem não tem SSH — a regra em hospedagem compartilhada — não conseguia nem
+  instalar as dependências da própria aplicação
+- Sempre dentro do bubblewrap, vendo apenas o diretório da aplicação: um
+  `postinstall` comprometido não alcança o `.env` do app vizinho porque o
+  vizinho não existe no namespace. Verificado no servidor com um script hostil,
+  que recebeu `No such file or directory` ao tentar ler
+- Desprendido da requisição: um `install` grande passa do timeout do CGI, e
+  prender a resposta a ele faria a página perder a execução no meio. O comando
+  segue em sessão própria e o estado fica em `.run/`, que é do root com sticky
+  bit — a conta lê o próprio job, não o reescreve
+- `--ignore-scripts` em `install`/`update`/`ci`, não em `npm run`: o hook de uma
+  dependência transitiva é código que o cliente nunca leu; o script dele é o que
+  ele está pedindo para executar
+- `install`/`update`/`ci` exigem a aplicação parada — reescrever `node_modules`
+  sob um processo que lê dela a quebra sem erro claro. Um job por aplicação, e
+  timeout de 15 minutos para o comando travado não ficar para sempre
+- `stop-job` manda `SIGINT` ao grupo de processos, o mesmo do Ctrl+C: o npm
+  encerra sem deixar `node_modules` pela metade, e o `SIGKILL` só vem depois de
+  cinco segundos
+
+**Estado das dependências, sem executar npm**
+- `dependency_state` decide entre cinco situações — nada declarado, não
+  instaladas, instalação incompleta, `package.json` mudou, tudo certo —
+  comparando `package.json`, `package-lock.json` e o disco
+- Não usa `npm ls` de propósito: ele exige o npm no `PATH`, que sob o CGI do
+  painel não traz `/usr/local/bin`, e custa meio segundo contra os 35ms da
+  leitura de arquivo. Também não resolve semver — se `^2.1.3` está satisfeito é
+  o npm quem decide, e adivinhar aqui daria respostas confiantes e erradas
+
+**`scripts`, para o painel saber o que a aplicação declara**
+- Só os nomes, nunca o corpo: corpo de script é shell escrito pelo cliente, e o
+  painel não tem por que renderizar isso
+- Os nomes passam por filtro porque é aqui que um nome deixa de ser dado e vira
+  parte de uma linha de comando: nada que comece com `-`, sem espaço, aspas ou
+  separador
+
+**`set-entry`, para trocar o arquivo de entrada**
+- O `entry` era decidido na criação e ficava assim para sempre. Quem migrou de
+  `index.js` para `app.mjs`, ou de JavaScript para TypeScript, só resolvia
+  apagando a aplicação e criando outra
+- A recusa acontece **antes** da gravação: o prelúdio escreve o `.app` como
+  root, e validar só depois deixaria a aplicação apontando para um arquivo
+  inexistente
+
+**`package.json` criado junto com a aplicação Node**
+- Roda o `npm init` de verdade, e o resultado dele é o que fica — o painel não
+  escolhe entre CommonJS e ESM, nem entre JavaScript e TypeScript
+- Dois ajustes, com o próprio npm: sai o `scripts.test`, que só existe para
+  falhar, e `main` aponta para a entrada real, que o `npm init` não tem como
+  saber
+
+**O bubblewrap passa a ser distribuído pelo release**
+- Compilado estático a partir do commit `1b80120e` (v0.11.2), fixado por **SHA**
+  e não por tag, que pode ser reapontada. O workflow confere o SHA após o
+  checkout, a versão no `meson.build`, e recusa binário que não seja estático
+- A distribuição entrega versões antigas — o AlmaLinux 9 traz 0.6.3 — e o
+  comportamento do sandbox precisa ser o mesmo em todo servidor
+
+**O diagnóstico reporta o isolamento**
+- Binário ausente e namespaces desligados no kernel são causas diferentes, que o
+  admin resolve de formas diferentes. Reporta também a versão instalada
+
 **Documentos de contribuição**
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `AI-POLICY.md`, templates de issue e
   de pull request. O guia descreve o modelo de privilégio do `plan.rs`, que toda
@@ -272,6 +337,21 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
   `reseller/` é script que o DA executa, e vai a 755
 
 ### Changed
+
+**Isolamento ligado por padrão**
+- Estava desligado por uma razão que deixou de existir: o bubblewrap vinha da
+  distribuição e podia não estar lá, então ligar por padrão teria recusado
+  iniciar aplicações em servidores sem o pacote
+- Desligado significava que ninguém pagava nada pelo isolamento e ninguém tinha
+  nenhum: uma aplicação ler o `.env` da vizinha era a norma. A escolha do admin
+  continua valendo, e servidores que já gravaram a preferência não mudam
+
+**O sandbox usa o bubblewrap do painel, sem cair para o do sistema**
+- Cair para a versão da distribuição trocaria o comportamento do sandbox sem
+  ninguém perceber, incluindo versões anteriores a correções que a nossa já tem
+- E recusa executar quando o binário falta, em vez de rodar sem confinamento: um
+  pacote de terceiros fora do sandbox por causa de arquivo ausente é exatamente
+  o que ele existe para evitar
 
 **Runtimes reunidos em `Runtime`**
 - O comportamento que varia por ambiente era decidido por comparações
