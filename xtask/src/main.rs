@@ -477,11 +477,14 @@ fn sonda_instalacao(p: &mut Placar, esperado: Option<&str>, instalado: &str) {
         std::fs::metadata(CORE)
             .map_err(|e| e.to_string())
             .and_then(|m| {
-                let modo = m.mode() & 0o7777;
-                if m.uid() == 0 && m.gid() == 0 && modo == 0o4755 {
+                let mut erros = problemas_de_posse(&m);
+                if m.mode() & 0o4000 == 0 {
+                    erros.push("sem setuid");
+                }
+                if erros.is_empty() {
                     Ok(())
                 } else {
-                    Err(format!("dono {}:{} modo {modo:o}", m.uid(), m.gid()))
+                    Err(erros.join(", "))
                 }
             }),
     );
@@ -497,13 +500,12 @@ fn sonda_instalacao(p: &mut Placar, esperado: Option<&str>, instalado: &str) {
                 let Ok(m) = std::fs::symlink_metadata(e.path()) else {
                     continue;
                 };
-                if m.uid() != 0 || m.mode() & 0o022 != 0 || m.file_type().is_symlink() {
+                let erros = problemas_de_posse(&m);
+                if !erros.is_empty() {
                     problemas.push(format!(
-                        "{} ({}:{} {:o})",
+                        "{} ({})",
                         e.file_name().to_string_lossy(),
-                        m.uid(),
-                        m.gid(),
-                        m.mode() & 0o7777
+                        erros.join(", ")
                     ));
                 }
             }
@@ -518,6 +520,27 @@ fn sonda_instalacao(p: &mut Placar, esperado: Option<&str>, instalado: &str) {
             Err(problemas.join(", "))
         },
     );
+}
+
+/// O que há de errado na posse de um arquivo que só o root pode alterar.
+///
+/// Descreve o problema em vez de ecoar uid, gid e modo: a saída da sonda vai
+/// para terminais e logs de quem a roda, e o número não diz o que corrigir.
+fn problemas_de_posse(m: &std::fs::Metadata) -> Vec<&'static str> {
+    let mut erros = Vec::new();
+    if m.file_type().is_symlink() {
+        erros.push("é symlink");
+    }
+    if m.uid() != 0 {
+        erros.push("dono não é root");
+    }
+    if m.gid() != 0 {
+        erros.push("grupo não é root");
+    }
+    if m.mode() & 0o022 != 0 {
+        erros.push("gravável por grupo ou outros");
+    }
+    erros
 }
 
 fn sonda_app(p: &mut Placar, conta: &str, app: &str, tipo: &str) {
