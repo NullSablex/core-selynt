@@ -9,6 +9,9 @@ license = "AGPL-3.0-or-later"
 keywords = ["process-manager", "directadmin", "selynt"]
 categories = ["command-line-utilities"]
 
+[workspace]
+members = ["xtask"]
+
 [[bin]]
 name = "core-selynt"
 path = "src/main.rs"

@@ -61,12 +61,11 @@ servidor de verdade — posse de arquivo, queda de privilégio, scope do systemd
 Para isso existe a sonda:
 
 ```sh
-scp tools/sonda.sh servidor:/tmp/
-ssh servidor 'sh /tmp/sonda.sh [conta] [app]'
+cargo xtask sonda <host-ssh> [--conta C] [--app A]
 ```
 
-Só leitura por padrão; `SONDA_ESCRITA=1` inclui `sync-proxy` e `netguard`.
-Detalhes em [tools/README.md](tools/README.md).
+Só leitura por padrão; `--escrita` inclui `sync-proxy` e `netguard`.
+Detalhes em [xtask/README.md](xtask/README.md).
 
 ## Estrutura do projeto
 
@@ -80,7 +79,7 @@ src/install/     ← instalação, remoção, unidades do systemd e diagnóstico
 src/runtime/     ← detecção de runtimes e versões do Node
 src/admin/       ← comandos administrativos
 src/sys/         ← autenticação, sistema de arquivos, estado, processos, saída
-tools/           ← sonda de deploy (não faz parte do binário)
+xtask/           ← sonda de deploy (`cargo xtask sonda`; não faz parte do binário)
 ```
 
 `plan.rs` é o coração do modelo de privilégio: cada comando é um braço do match,

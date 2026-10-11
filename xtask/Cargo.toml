@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+authors = ["NullSablex <https://github.com/NullSablex>"]
+description = "Tarefas de desenvolvimento do core-selynt (sonda de deploy)"
+repository = "https://github.com/NullSablex/core-selynt"
+license = "AGPL-3.0-or-later"
+readme = "README.md"
+keywords = ["xtask"]
+categories = ["development-tools"]
+publish = false
+
+[dependencies]
+serde_json = "1.0"
