@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn the_legacy_include_stays_where_there_is_no_drop_in() {
         let main = format!("{INCLUDE_BEGIN}\ninclude /x/{HANDLERS_FILE}\n{INCLUDE_END}\n");
-        let d = layout("keep", &main, false);
+        let d = layout("legacy-kept", &main, false);
         assert!(!retire_legacy_include(&d).unwrap());
         assert!(handlers_are_included(&d));
         let _ = std::fs::remove_dir_all(&d);
