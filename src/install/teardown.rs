@@ -114,10 +114,19 @@ fn clean_web_server_config() -> Vec<String> {
             }
         }
 
-        let conf = dir.join("selynt_extprocessors.conf");
+        // Both layouts: the include-line one and the `conf.d/` drop-in.
+        let conf = dir.join(crate::webserver::ols::HANDLERS_FILE);
+        let drop_in = dir
+            .join("conf.d")
+            .join(crate::webserver::ols::HANDLERS_FILE);
         // A file that was never there is not a failure — only one that resisted
         // deletion is.
-        for p in [conf.clone(), conf.with_extension("conf.tmp")] {
+        for p in [
+            conf.clone(),
+            conf.with_extension("conf.tmp"),
+            drop_in.clone(),
+            drop_in.with_extension("conf.tmp"),
+        ] {
             if let Err(e) = std::fs::remove_file(&p)
                 && e.kind() != std::io::ErrorKind::NotFound
             {

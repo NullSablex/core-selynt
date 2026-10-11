@@ -248,7 +248,7 @@ fn check_proxy_config(r: &mut Report) {
         return;
     };
 
-    let ep_conf = conf_dir.join("selynt_extprocessors.conf");
+    let ep_conf = crate::webserver::ols::handlers_path(conf_dir);
     match std::fs::read_to_string(&ep_conf) {
         Ok(content) => {
             let count = content
@@ -268,12 +268,12 @@ fn check_proxy_config(r: &mut Report) {
     // line every proxied app answers 503 while looking healthy from every other
     // angle — process up, socket accepting, marker in place — and DirectAdmin
     // drops it whenever it rewrites the file.
-    match std::fs::read_to_string(conf_dir.join("httpd_config.conf")) {
-        Ok(main) if main.contains("selynt_extprocessors.conf") => {
-            r.add(Level::Pass, "proxy", "include_ok", None);
-        }
-        Ok(_) => r.add(Level::Fail, "proxy", "include_missing", None),
-        Err(_) => r.add(Level::Warn, "proxy", "main_conf_unreadable", None),
+    if !conf_dir.join("httpd_config.conf").is_file() {
+        r.add(Level::Warn, "proxy", "main_conf_unreadable", None);
+    } else if crate::webserver::ols::handlers_are_included(conf_dir) {
+        r.add(Level::Pass, "proxy", "include_ok", None);
+    } else {
+        r.add(Level::Fail, "proxy", "include_missing", None);
     }
 
     // A vhost only routes to the panel once it carries the proxy handler, and
