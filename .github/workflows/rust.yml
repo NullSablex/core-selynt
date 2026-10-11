@@ -45,9 +45,11 @@ jobs:
         # Strict mode: every lint group is denied, not warned. Any finding from
         # `pedantic`, `nursery` or `cargo` fails the build. `--all-targets`
         # covers lib/bin/tests/examples; `--all-features` ensures no
-        # feature-gated code is silently skipped.
+        # feature-gated code is silently skipped; `--workspace` brings in the
+        # xtask crate, held to the same bar.
         run: |
           cargo clippy \
+            --workspace \
             --target x86_64-unknown-linux-musl \
             --all-targets \
             --all-features \

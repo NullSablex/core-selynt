@@ -28,7 +28,7 @@ O uso de IA é permitido — você é responsável pelo que envia. Ver AI-POLICY
 - [ ] Clippy estrito passa (`-D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo`)
 - [ ] `cargo test` passa
 - [ ] Atualizei o `CHANGELOG.md`
-- [ ] Rodei a sonda num servidor, se a mudança afeta o binário instalado
+- [ ] Rodei a sonda (`cargo xtask sonda`) num servidor, se a mudança afeta o binário instalado
 
 ## Privilégio
 

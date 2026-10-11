@@ -380,6 +380,19 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 ### Changed
 
+**Sonda de deploy em Rust (`cargo xtask sonda`)**
+- `tools/sonda.sh` dependia de `python3` embutido para ler JSON e citava um
+  `tools/mapa.py` que não existe. Sai, junto com o README dele
+- A sonda passa a ser o crate `xtask`: `cargo xtask sonda <host>` compila a si
+  mesma como binário musl, roda no servidor e apaga a cópia. Do lado do
+  servidor não é preciso nada além dela
+- Mais estrita: cobra o contrato inteiro (uma linha de JSON no stdout, nada no
+  stderr, `ok` coerente com o código de saída, tipo de cada campo), o `error`
+  e o código de saída de cada recusa, dono e modo do binário e de `etc/`,
+  `fail` do diagnóstico como falha, a concordância entre a visão do admin e a
+  da conta, e — com `--binario` — que o binário instalado é o compilado
+- O clippy do CI passa a cobrir o workspace, xtask incluso
+
 **Isolamento ligado por padrão**
 - Estava desligado por uma razão que deixou de existir: o bubblewrap vinha da
   distribuição e podia não estar lá, então ligar por padrão teria recusado
