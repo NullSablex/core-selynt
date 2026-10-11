@@ -143,7 +143,13 @@ mod glob_tests {
 
     #[test]
     fn rejects_multiple_stars_and_missing_dir() {
-        assert!(glob_paths("/opt/*/x/*/node").is_empty());
-        assert!(glob_paths("/nonexistent-selynt/*/node").is_empty());
+        assert_eq!(
+            glob_paths("/opt/*/x/*/node"),
+            Vec::<std::path::PathBuf>::new()
+        );
+        assert_eq!(
+            glob_paths("/nonexistent-selynt/*/node"),
+            Vec::<std::path::PathBuf>::new()
+        );
     }
 }

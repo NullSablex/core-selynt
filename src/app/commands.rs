@@ -833,7 +833,7 @@ mod argument_tests {
     fn splits_on_whitespace_and_refuses_the_bad_one() {
         assert_eq!(split_arguments("a b c").unwrap(), vec!["a", "b", "c"]);
         assert!(split_arguments("ok --evil").is_err());
-        assert!(split_arguments("").unwrap().is_empty());
+        assert_eq!(split_arguments("").unwrap(), Vec::<String>::new());
     }
 
     #[test]
