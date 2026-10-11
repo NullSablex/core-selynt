@@ -90,25 +90,39 @@ pub fn get_status(state_dir: &Path, name: &str) -> (String, Option<u32>, Option<
     };
 
     let my_uid = nix::unistd::getuid().as_raw();
-    if read_proc_uid(pid) != Some(my_uid) {
+    let meta_kv = parse_kv(&std::fs::read_to_string(&meta_file).unwrap_or_default());
+    if !pid_is_the_app(pid, my_uid, &meta_kv) {
         return ("STOPPED".to_string(), None, None);
-    }
-
-    let meta_content = std::fs::read_to_string(&meta_file).unwrap_or_default();
-    let meta_kv = parse_kv(&meta_content);
-    if let Some(saved) = meta_kv.get("starttime") {
-        let saved_start: u64 = saved.parse().unwrap_or(0);
-        if saved_start > 0 && read_proc_starttime(pid) != Some(saved_start) {
-            return ("STOPPED".to_string(), None, None);
-        }
     }
 
     let started_at: Option<u64> = meta_kv.get("started_at").and_then(|v| v.parse().ok());
     ("RUNNING".to_string(), Some(pid), started_at)
 }
 
-/// Lightweight status check used by the admin command. Skips UID matching
-/// because admin reads other users' state dirs as root before the drop.
+/// Whether `pid` is still the process the app started, and not another one
+/// that inherited the number.
+///
+/// A pid alone proves nothing once the app has died: the kernel hands the
+/// number to the next process, and "alive" then reports a stranger as the app.
+/// The owner and the start time recorded at launch tell them apart.
+fn pid_is_the_app(pid: u32, uid: u32, meta_kv: &std::collections::HashMap<String, String>) -> bool {
+    if read_proc_uid(pid) != Some(uid) {
+        return false;
+    }
+    let saved_start: u64 = meta_kv
+        .get("starttime")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    saved_start == 0 || read_proc_starttime(pid) == Some(saved_start)
+}
+
+/// Status check used by the admin overview, which reads every account's state
+/// as root before the drop.
+///
+/// Held to the same anti-reuse check as [`get_status`], with the uid recorded
+/// at launch in place of the caller's: checking only that the pid was alive
+/// showed a dead app as RUNNING once its number went to another process, and
+/// the overview disagreed with what the account itself saw.
 pub fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u32>, Option<u64>) {
     let Ok(pid_str) = std::fs::read_to_string(pid_file) else {
         return ("STOPPED".to_string(), None, None);
@@ -116,14 +130,15 @@ pub fn admin_get_status(pid_file: &Path, meta_file: &Path) -> (String, Option<u3
     let Ok(pid) = pid_str.trim().parse::<u32>() else {
         return ("STOPPED".to_string(), None, None);
     };
-    if is_process_alive(pid) {
-        let started_at: Option<u64> = std::fs::read_to_string(meta_file)
-            .ok()
-            .and_then(|c| parse_kv(&c).get("started_at").and_then(|v| v.parse().ok()));
-        ("RUNNING".to_string(), Some(pid), started_at)
-    } else {
-        ("STOPPED".to_string(), None, None)
+    let meta_kv = parse_kv(&std::fs::read_to_string(meta_file).unwrap_or_default());
+    let Some(uid) = meta_kv.get("uid").and_then(|v| v.parse::<u32>().ok()) else {
+        return ("STOPPED".to_string(), None, None);
+    };
+    if !pid_is_the_app(pid, uid, &meta_kv) {
+        return ("STOPPED".to_string(), None, None);
     }
+    let started_at: Option<u64> = meta_kv.get("started_at").and_then(|v| v.parse().ok());
+    ("RUNNING".to_string(), Some(pid), started_at)
 }
 
 /// Touches the sync marker file so the cron sync job knows to re-render the
