@@ -192,9 +192,8 @@ pub fn sync() -> Option<usize> {
         }
     }
 
-    let conf = ols::conf_dir()
-        .unwrap_or_else(|| Path::new("/etc/openlitespeed"))
-        .join("selynt_extprocessors.conf");
+    let conf_dir = ols::conf_dir().unwrap_or_else(|| Path::new("/etc/openlitespeed"));
+    let conf = ols::handlers_path(conf_dir);
 
     // Only touch the file when the handlers actually differ. The timer runs
     // every few seconds, and rewriting an identical config would reload the web
@@ -202,16 +201,21 @@ pub fn sync() -> Option<usize> {
     let unchanged = std::fs::read_to_string(&conf)
         .is_ok_and(|current| strip_header(&current) == strip_header(&content));
 
-    if !unchanged {
-        if write_config(&conf, &content).is_err() {
-            return None;
-        }
-        // A config the web server never read is a config that does not apply.
-        // Leaving the marker makes the next sweep try again, instead of the
-        // routing staying stale until something else happens to change.
-        if !reload_web_server() {
-            return None;
-        }
+    if !unchanged && write_config(&conf, &content).is_err() {
+        return None;
+    }
+    // Only after the new file is in place: the old include is what serves the
+    // apps until then. Kept on every sweep, so a server that got only the new
+    // binary migrates without anyone running `setup`.
+    let Ok(retired) = ols::retire_legacy_include(conf_dir) else {
+        return None;
+    };
+
+    // A config the web server never read is a config that does not apply.
+    // Leaving the marker makes the next sweep try again, instead of the
+    // routing staying stale until something else happens to change.
+    if (!unchanged || retired) && !reload_web_server() {
+        return None;
     }
 
     // Cleared only once the config is in place *and* live.
