@@ -151,10 +151,11 @@ pub fn caller_is_privileged() -> bool {
         return false;
     };
 
-    if usertype_is_privileged(da_usertype(&caller).as_deref()) {
-        return true;
-    }
+    usertype_is_privileged(da_usertype(&caller).as_deref()) || is_service_account(&caller)
+}
 
+/// Whether `caller` is one of the accounts `DirectAdmin` or the web server run as.
+fn is_service_account(caller: &str) -> bool {
     SERVICE_ACCOUNT_FILES
         .iter()
         .filter_map(|f| std::fs::read_to_string(format!("{PLUGIN_PATH}/{f}")).ok())
@@ -162,6 +163,27 @@ pub fn caller_is_privileged() -> bool {
             let name = name.trim();
             !name.is_empty() && name == caller
         })
+}
+
+/// Whether the caller may change server-wide policy.
+///
+/// Stricter than [`caller_is_privileged`]: a reseller acts on its own customers,
+/// but a policy that applies to every account on the server is the server
+/// administrator's alone. Root, an `admin` account and the panel's service
+/// accounts qualify; a `reseller` does not.
+pub fn caller_is_server_admin() -> bool {
+    let caller_uid = unsafe { libc::getuid() };
+    if caller_uid == 0 {
+        return true;
+    }
+    let Some(caller) = lookup_uid(caller_uid) else {
+        return false;
+    };
+    match da_usertype(&caller).as_deref() {
+        Some("admin") => true,
+        Some("reseller" | "user") => false,
+        _ => is_service_account(&caller),
+    }
 }
 
 /// Resolves the account this invocation may act on, as

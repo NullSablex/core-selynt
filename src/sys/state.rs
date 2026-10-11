@@ -185,6 +185,96 @@ fn server_default_isolated(conteudo: Option<String>) -> bool {
     conteudo.is_none_or(|v| v.trim() == "1")
 }
 
+/// Comandos npm que o painel sabe executar.
+///
+/// É o teto do preset: o admin escolhe quais destes ficam liberados, mas não
+/// acrescenta um que não esteja aqui. Comando novo é código novo no core, com a
+/// sua própria análise — `exec` e `publish`, por exemplo, nunca entram.
+pub const NPM_COMMANDS: [&str; 4] = ["install", "update", "ci", "run"];
+
+/// Política do servidor para os comandos npm do painel.
+///
+/// Uma só para o servidor inteiro, e só o admin altera: não há preset por
+/// conta nem exceção por revendedor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmPolicy {
+    /// Comandos liberados, na ordem de [`NPM_COMMANDS`].
+    pub commands: Vec<String>,
+    /// Se `install`, `update` e `ci` rodam com `--ignore-scripts`.
+    pub ignore_scripts: bool,
+}
+
+impl NpmPolicy {
+    pub fn allows(&self, command: &str) -> bool {
+        self.commands.iter().any(|c| c == command)
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "commands": self.commands,
+            "ignore_scripts": self.ignore_scripts,
+        })
+    }
+
+    /// Conteúdo do arquivo `etc/npm_policy`.
+    pub fn to_file(&self) -> String {
+        format!(
+            "commands={}\nignore_scripts={}\n",
+            self.commands.join(","),
+            u8::from(self.ignore_scripts)
+        )
+    }
+
+    /// Monta a política a partir do que o admin pediu, descartando o que não é
+    /// comando conhecido.
+    pub fn from_request(commands: &str, ignore_scripts: bool) -> Self {
+        Self {
+            commands: known_commands(commands),
+            ignore_scripts,
+        }
+    }
+}
+
+/// Os comandos conhecidos de uma lista separada por vírgula, na ordem do
+/// catálogo e sem repetição.
+fn known_commands(lista: &str) -> Vec<String> {
+    let pedidos: Vec<&str> = lista.split(',').map(str::trim).collect();
+    NPM_COMMANDS
+        .iter()
+        .filter(|c| pedidos.contains(c))
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A política em vigor, lida de `etc/npm_policy`.
+pub fn npm_policy() -> NpmPolicy {
+    parse_npm_policy(
+        std::fs::read_to_string(format!("{PLUGIN_PATH}/etc/npm_policy"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// A política a partir do conteúdo do arquivo.
+///
+/// Sem arquivo, vale o que o painel sempre fez: os quatro comandos, com os
+/// scripts de instalação desligados. Na dúvida, o lado seguro: só um `0`
+/// explícito libera os scripts, e comando desconhecido é descartado.
+fn parse_npm_policy(conteudo: Option<&str>) -> NpmPolicy {
+    let kv = conteudo.map(parse_kv).unwrap_or_default();
+
+    let commands = kv.get("commands").map_or_else(
+        || NPM_COMMANDS.iter().map(ToString::to_string).collect(),
+        |lista| known_commands(lista),
+    );
+    let ignore_scripts = kv.get("ignore_scripts").is_none_or(|v| v.trim() != "0");
+
+    NpmPolicy {
+        commands,
+        ignore_scripts,
+    }
+}
+
 /// The socket path a running app actually has, recorded when it started.
 ///
 /// Not the same as `socket_path_for` once the isolation mode changes: the path
@@ -324,5 +414,51 @@ mod default_isolated_tests {
     fn only_an_explicit_one_counts_as_enabled() {
         assert!(!server_default_isolated(Some(String::new())));
         assert!(!server_default_isolated(Some("lixo".to_string())));
+    }
+}
+
+#[cfg(test)]
+mod npm_policy_tests {
+    use super::{NPM_COMMANDS, NpmPolicy, parse_npm_policy};
+
+    /// Sem preset gravado, o comportamento é o de antes de ele existir.
+    #[test]
+    fn without_a_file_everything_is_allowed_and_scripts_stay_off() {
+        let p = parse_npm_policy(None);
+        assert_eq!(p.commands, NPM_COMMANDS);
+        assert!(p.ignore_scripts);
+    }
+
+    #[test]
+    fn the_file_round_trips() {
+        let p = NpmPolicy::from_request("run,install", false);
+        assert_eq!(p.commands, ["install", "run"]);
+        assert_eq!(parse_npm_policy(Some(&p.to_file())), p);
+    }
+
+    /// O arquivo não amplia o catálogo: um comando que o core não conhece não
+    /// vira comando por estar escrito ali.
+    #[test]
+    fn unknown_commands_are_dropped() {
+        let p = parse_npm_policy(Some("commands=install,exec, publish ,run\n"));
+        assert_eq!(p.commands, ["install", "run"]);
+    }
+
+    /// Lista vazia é escolha do admin — nada liberado —, não arquivo ausente.
+    #[test]
+    fn an_empty_list_allows_nothing() {
+        let p = parse_npm_policy(Some("commands=\nignore_scripts=1\n"));
+        assert_eq!(p.commands, Vec::<String>::new());
+        assert!(!p.allows("install"));
+    }
+
+    /// Só o `0` explícito libera os scripts de instalação.
+    #[test]
+    fn only_an_explicit_zero_enables_install_scripts() {
+        for v in ["1", "", "lixo", "false"] {
+            let p = parse_npm_policy(Some(&format!("ignore_scripts={v}\n")));
+            assert!(p.ignore_scripts, "{v:?} não deveria liberar os scripts");
+        }
+        assert!(!parse_npm_policy(Some("ignore_scripts=0\n")).ignore_scripts);
     }
 }

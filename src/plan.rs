@@ -318,6 +318,18 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
                 let d = dbg;
                 Box::new(move || crate::emit_prelude_result(out, d.as_ref()))
             }
+            AdminCommands::NpmPolicy => {
+                let d = dbg;
+                Box::new(move || admin::server::cmd_npm_policy(d.as_ref()))
+            }
+            AdminCommands::SaveNpmPolicy {
+                commands,
+                ignore_scripts,
+            } => {
+                let out = admin::server::save_npm_policy(&commands, ignore_scripts);
+                let d = dbg;
+                Box::new(move || crate::emit_prelude_result(out, d.as_ref()))
+            }
             AdminCommands::SetLocale { locale } => {
                 let out = admin::locale::set_locale_global(&locale);
                 let d = dbg;

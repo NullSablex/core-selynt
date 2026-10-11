@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 use crate::sys::output::{success, user_error};
-use crate::sys::state::{AppMeta, load_app_meta};
+use crate::sys::state::{AppMeta, NpmPolicy, load_app_meta, npm_policy};
 
 use super::with_debug;
 
@@ -32,7 +32,9 @@ const TIMEOUT_SECS: u64 = 900;
 /// O que o painel pode pedir para executar.
 ///
 /// Lista fechada: o cliente escolhe entre isto e os scripts que ele mesmo
-/// declarou no `package.json`. Não há caminho para um comando arbitrário.
+/// declarou no `package.json`. Não há caminho para um comando arbitrário. O
+/// admin restringe ainda mais pelo preset do servidor (`etc/npm_policy`), mas
+/// não amplia: o catálogo é [`crate::sys::state::NPM_COMMANDS`].
 #[derive(Clone, Copy)]
 pub enum Kind {
     Install,
@@ -94,14 +96,26 @@ impl Paths {
 /// O npm é invocado com o `node` da aplicação no `PATH`, não com o do sistema:
 /// a versão que instala as dependências tem de ser a mesma que vai executá-las,
 /// senão módulo nativo compila para o binário errado.
-fn build_command(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Command {
-    let inner = build_inner(meta, kind, script, args);
+fn build_command(
+    meta: &AppMeta,
+    kind: Kind,
+    script: &str,
+    args: &[String],
+    ignore_scripts: bool,
+) -> Command {
+    let inner = build_inner(meta, kind, script, args, ignore_scripts);
     let cwd = PathBuf::from(&meta.cwd);
     crate::limits::sandbox::wrap_command(&inner, &cwd)
 }
 
 /// Monta o comando npm em si, antes do confinamento.
-fn build_inner(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Command {
+fn build_inner(
+    meta: &AppMeta,
+    kind: Kind,
+    script: &str,
+    args: &[String],
+    ignore_scripts: bool,
+) -> Command {
     let node_bin = if meta.node_version.is_empty() {
         crate::runtime::detect::default_node_path().unwrap_or_else(|| "node".to_string())
     } else {
@@ -124,8 +138,9 @@ fn build_inner(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Com
     // Sem os scripts do pacote: `postinstall` de uma dependência transitiva é
     // código de terceiro que o cliente nunca leu, e é por onde os ataques de
     // supply chain entram. Não protege contra o próprio cliente — ele tem FTP —,
-    // e sim contra o que ele não escolheu.
-    if kind.rewrites_tree() {
+    // e sim contra o que ele não escolheu. Ligado por padrão; o admin pode
+    // desligar no preset, e é o que destrava pacote com build nativo.
+    if kind.rewrites_tree() && ignore_scripts {
         inner.arg("--ignore-scripts");
     }
     inner.arg("--no-audit").arg("--no-fund");
@@ -150,13 +165,6 @@ fn build_inner(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Com
     inner
 }
 
-/// Só o comando npm, sem o confinamento.
-///
-/// Existe para os testes: `build_command` termina em `wrap_command`, que encerra
-/// o processo quando o bwrap não está instalado — e ele não está na máquina de
-/// quem desenvolve nem na CI. Sem esta separação os testes do npm não teriam
-/// como rodar, e a alternativa (pular quando falta o binário) já se mostrou
-/// pior: eles passariam sem verificar nada.
 /// Interrompe o comando em execução.
 ///
 /// Envia `SIGINT` — o mesmo que o Ctrl+C de um terminal —, que é o sinal que o
@@ -213,9 +221,16 @@ pub fn cmd_stop_job(state_dir: &Path, app: &str, gid: u32, dbg: Option<&Value>) 
     success(with_debug(json!({ "stopped": true }), dbg));
 }
 
+/// Só o comando npm, sem o confinamento.
+///
+/// Existe para os testes: `build_command` termina em `wrap_command`, que encerra
+/// o processo quando o bwrap não está instalado — e ele não está na máquina de
+/// quem desenvolve nem na CI. Sem esta separação os testes do npm não teriam
+/// como rodar, e a alternativa (pular quando falta o binário) já se mostrou
+/// pior: eles passariam sem verificar nada.
 #[cfg(test)]
 fn build_npm_command(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) -> Command {
-    build_inner(meta, kind, script, args)
+    build_inner(meta, kind, script, args, true)
 }
 
 /// Grava o estado do job. Escrita atômica: a página consulta a qualquer
@@ -289,6 +304,13 @@ pub fn cmd_run_job(
     let Some(kind) = Kind::parse(kind_raw) else {
         user_error("invalid_command", &format!("unknown command '{kind_raw}'"));
     };
+    let policy = npm_policy();
+    if !policy.allows(kind.npm_arg()) {
+        user_error(
+            "command_disabled",
+            &format!("the server administrator disabled 'npm {}'", kind.npm_arg()),
+        );
+    }
 
     // Nome de script vem do `package.json` do cliente, mas chega até aqui pela
     // rede: é aqui que ele deixa de ser dado e vira parte de uma linha de
@@ -341,7 +363,7 @@ pub fn cmd_run_job(
         }),
     );
 
-    let cmd = build_command(&meta, kind, script, &args);
+    let cmd = build_command(&meta, kind, script, &args, policy.ignore_scripts);
 
     // O comando roda desprendido da requisição. Um `npm install` grande passa
     // do timeout do CGI com folga, e prender a resposta a ele significaria a
@@ -385,7 +407,63 @@ pub fn cmd_run_job(
     );
 
     let (code, timed_out) = run_to_completion(cmd, &paths.log);
+    record_outcome(
+        &paths,
+        gid,
+        &rotulo,
+        inicio,
+        code,
+        timed_out,
+        &skipped_if(&meta, kind, &policy, code),
+    );
 
+    // O filho não responde ao painel: quem perguntou já recebeu "running".
+    std::process::exit(0);
+}
+
+/// Pacotes nativos que ficaram sem compilar, e por quê.
+///
+/// Sem o script de instalação o `npm install` termina bem mesmo quando um
+/// pacote precisava compilar — a falha só aparece no start, com um
+/// `Cannot find module '.../build/Release/...'` que não diz a causa. Por isso
+/// a verificação é na árvore instalada, não no log.
+///
+/// Há dois motivos, e a saída de cada um é de alguém diferente. Com
+/// `--ignore-scripts`, quem libera é o admin. Sem ele, o que bloqueou foi o
+/// próprio npm: a partir do 11.17 o script de uma dependência só roda se o
+/// projeto o aprovar em `allowScripts` no `package.json` — e isso é do
+/// cliente. Olhar o resultado, e não a configuração, pega os dois casos.
+fn skipped_if(
+    meta: &AppMeta,
+    kind: Kind,
+    policy: &NpmPolicy,
+    code: i32,
+) -> (Vec<String>, Option<&'static str>) {
+    if !kind.rewrites_tree() || code != 0 {
+        return (Vec::new(), None);
+    }
+    let pulados = skipped_native_builds(Path::new(&meta.cwd));
+    if pulados.is_empty() {
+        return (pulados, None);
+    }
+    let motivo = if policy.ignore_scripts {
+        "ignore_scripts"
+    } else {
+        "not_approved"
+    };
+    (pulados, Some(motivo))
+}
+
+/// Grava o desfecho do job.
+fn record_outcome(
+    paths: &Paths,
+    gid: u32,
+    rotulo: &str,
+    inicio: u64,
+    code: i32,
+    timed_out: bool,
+    (skipped, reason): &(Vec<String>, Option<&str>),
+) {
     let status = if timed_out {
         "timeout"
     } else if code == 0 {
@@ -394,7 +472,7 @@ pub fn cmd_run_job(
         "failed"
     };
     write_state(
-        &paths,
+        paths,
         gid,
         &json!({
             "status": status,
@@ -402,11 +480,141 @@ pub fn cmd_run_job(
             "started_at": inicio,
             "finished_at": now_secs(),
             "exit_code": code,
+            "skipped_builds": skipped,
+            "skipped_reason": reason,
         }),
     );
+}
 
-    // O filho não responde ao painel: quem perguntou já recebeu "running".
-    std::process::exit(0);
+/// Quantos pacotes a verificação de build nativo visita antes de desistir.
+///
+/// Uma árvore real fica na casa do milhar; o teto existe para uma árvore
+/// patológica não prender o job depois de o npm já ter terminado.
+const MAX_PACKAGES_SCANNED: usize = 20_000;
+
+/// Pacotes instalados que precisavam compilar código nativo e não compilaram.
+///
+/// Roda como a conta, sobre a árvore dela, e não segue symlink: um link em
+/// `node_modules` apontando para fora não leva a verificação junto.
+fn skipped_native_builds(app_dir: &Path) -> Vec<String> {
+    let mut achados = std::collections::BTreeSet::new();
+    let mut pendentes = vec![app_dir.join("node_modules")];
+    let mut visitados = 0usize;
+
+    while let Some(dir) = pendentes.pop() {
+        for (nome, pacote) in packages_in(&dir) {
+            visitados += 1;
+            if visitados > MAX_PACKAGES_SCANNED {
+                return achados.into_iter().collect();
+            }
+            if needs_native_build(&pacote) && !has_compiled_addon(&pacote) {
+                achados.insert(nome);
+            }
+            let aninhado = pacote.join("node_modules");
+            if is_real_dir(&aninhado) {
+                pendentes.push(aninhado);
+            }
+        }
+    }
+    achados.into_iter().collect()
+}
+
+/// Os pacotes de um `node_modules`, como `(nome, diretório)`, incluindo os de
+/// escopo (`@img/sharp`).
+fn packages_in(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(entradas) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entradas.flatten() {
+        let nome = e.file_name().to_string_lossy().to_string();
+        let caminho = e.path();
+        if nome.starts_with('.') || !is_real_dir(&caminho) {
+            continue;
+        }
+        if nome.starts_with('@') {
+            if let Ok(sub) = std::fs::read_dir(&caminho) {
+                for s in sub.flatten() {
+                    if is_real_dir(&s.path()) {
+                        let n = s.file_name().to_string_lossy().to_string();
+                        out.push((format!("{nome}/{n}"), s.path()));
+                    }
+                }
+            }
+        } else {
+            out.push((nome, caminho));
+        }
+    }
+    out
+}
+
+fn is_real_dir(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// Se o pacote compila código nativo na instalação.
+///
+/// `binding.gyp` faz o npm rodar `node-gyp rebuild` sozinho; os demais
+/// declaram a ferramenta no script. Pacote que já traz binários prontos em
+/// `prebuilds/` carrega deles em tempo de execução e funciona sem o script —
+/// é o caso de `bufferutil`, dependência comum do `ws`.
+fn needs_native_build(pkg_dir: &Path) -> bool {
+    if is_real_dir(&pkg_dir.join("prebuilds")) {
+        return false;
+    }
+    if std::fs::symlink_metadata(pkg_dir.join("binding.gyp")).is_ok_and(|m| m.is_file()) {
+        return true;
+    }
+    let Ok(raw) = std::fs::read_to_string(pkg_dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(pkg) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    let Some(scripts) = pkg.get("scripts").and_then(Value::as_object) else {
+        return false;
+    };
+    ["preinstall", "install", "postinstall"]
+        .iter()
+        .filter_map(|k| scripts.get(*k).and_then(Value::as_str))
+        .any(|s| {
+            ["node-gyp", "prebuild-install", "node-pre-gyp", "cmake-js"]
+                .iter()
+                .any(|f| s.contains(f))
+        })
+}
+
+/// Se o pacote tem um addon compilado (`*.node`) em algum lugar dele.
+///
+/// É o que separa "precisava compilar e compilou" de "precisava e não
+/// compilou", sem depender de onde cada ferramenta grava o resultado —
+/// `build/Release/` no node-gyp, `lib/binding/...` no node-pre-gyp. Não desce
+/// em `node_modules` (são outros pacotes) nem segue symlink.
+fn has_compiled_addon(pkg_dir: &Path) -> bool {
+    const MAX_ENTRIES: usize = 5_000;
+    let mut pendentes = vec![pkg_dir.to_path_buf()];
+    let mut vistos = 0usize;
+    while let Some(dir) = pendentes.pop() {
+        let Ok(entradas) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entradas.flatten() {
+            vistos += 1;
+            if vistos > MAX_ENTRIES {
+                return false;
+            }
+            let Ok(tipo) = e.file_type() else { continue };
+            let nome = e.file_name();
+            if tipo.is_dir() {
+                if nome != "node_modules" {
+                    pendentes.push(e.path());
+                }
+            } else if tipo.is_file() && Path::new(&nome).extension().is_some_and(|x| x == "node") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn now_secs() -> u64 {
@@ -448,7 +656,7 @@ pub fn cmd_job_status(state_dir: &Path, app: &str, dbg: Option<&Value>) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, build_npm_command};
+    use super::{Kind, build_inner, build_npm_command, skipped_native_builds};
     use crate::sys::state::AppMeta;
 
     fn meta(cwd: &str) -> AppMeta {
@@ -542,6 +750,97 @@ mod tests {
         assert!(a.contains(&"--unshare-pid".to_string()));
         // O diretório do vizinho não pode aparecer em nenhum bind.
         assert!(!a.iter().any(|x| x.contains("/home/bob/apps/outro")));
+    }
+
+    /// O admin pode liberar os scripts de instalação; o `npm run` não muda.
+    #[test]
+    fn the_policy_can_let_install_scripts_run() {
+        let m = meta("/home/bob/apps/api");
+        for k in [Kind::Install, Kind::Update, Kind::Ci] {
+            let c = build_inner(&m, k, "", &[], false);
+            assert!(!args_of(&c).contains(&"--ignore-scripts".to_string()));
+        }
+    }
+
+    /// O catálogo do preset e o que o core sabe executar são a mesma lista.
+    #[test]
+    fn the_policy_catalog_matches_the_known_commands() {
+        for c in crate::sys::state::NPM_COMMANDS {
+            assert!(
+                Kind::parse(c).is_some(),
+                "{c} está no catálogo mas não é comando"
+            );
+        }
+    }
+
+    fn pacote(raiz: &std::path::Path, nome: &str, pkg: &str, extra: &[&str]) {
+        let d = raiz.join("node_modules").join(nome);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("package.json"), pkg).unwrap();
+        for e in extra {
+            if e.ends_with('/') {
+                std::fs::create_dir_all(d.join(e)).unwrap();
+            } else {
+                std::fs::write(d.join(e), "").unwrap();
+            }
+        }
+    }
+
+    /// Reconhece os casos reais — `bcrypt` (node-pre-gyp), `sharp` antigo
+    /// (prebuild-install), pacote só com `binding.gyp`, mesmo aninhado ou com
+    /// escopo — e deixa de fora quem não compila ou já traz o binário.
+    #[test]
+    fn finds_the_packages_whose_native_build_was_skipped() {
+        let raiz = std::env::temp_dir().join(format!("selynt-native-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+
+        pacote(
+            &raiz,
+            "bcrypt",
+            r#"{"scripts":{"install":"node-pre-gyp install --fallback-to-build"}}"#,
+            &[],
+        );
+        pacote(
+            &raiz,
+            "sharp",
+            r#"{"scripts":{"install":"(node install/libvips && prebuild-install) || node-gyp rebuild"}}"#,
+            &[],
+        );
+        pacote(&raiz, "@scope/nativo", "{}", &["binding.gyp"]);
+        pacote(&raiz, "bcrypt/node_modules/interno", "{}", &["binding.gyp"]);
+        pacote(
+            &raiz,
+            "bufferutil",
+            r#"{"scripts":{"install":"node-gyp-build"}}"#,
+            &["binding.gyp", "prebuilds/"],
+        );
+        pacote(
+            &raiz,
+            "core-js",
+            r#"{"scripts":{"postinstall":"node -e \"hi\""}}"#,
+            &[],
+        );
+        pacote(&raiz, "express", "{}", &[]);
+        // Precisava compilar e compilou: o addon está lá.
+        pacote(
+            &raiz,
+            "compilado",
+            "{}",
+            &["binding.gyp", "build/", "build/addon.node"],
+        );
+
+        let achados = skipped_native_builds(&raiz);
+        let _ = std::fs::remove_dir_all(&raiz);
+
+        assert_eq!(achados, ["@scope/nativo", "bcrypt", "interno", "sharp"]);
+    }
+
+    #[test]
+    fn without_node_modules_nothing_is_reported() {
+        assert_eq!(
+            skipped_native_builds(std::path::Path::new("/nonexistent-selynt")),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

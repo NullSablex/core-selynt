@@ -239,6 +239,17 @@ enum AdminCommands {
         #[arg(long, action = clap::ArgAction::Set)]
         isolated: bool,
     },
+    /// Reports the server's npm policy.
+    NpmPolicy,
+    /// Sets the server's npm policy. Server administrator only — not resellers.
+    SaveNpmPolicy {
+        /// Comma-separated subset of `install,update,ci,run`. Empty allows none.
+        #[arg(long, default_value = "")]
+        commands: String,
+        /// Whether `install`, `update` and `ci` run with `--ignore-scripts`.
+        #[arg(long, action = clap::ArgAction::Set)]
+        ignore_scripts: bool,
+    },
     /// Runs the proxy-stack diagnostic and returns its report.
     Diagnose,
     /// Persists the plugin-wide default panel language.
@@ -379,6 +390,21 @@ fn main() {
         system_error(
             "admin_required",
             "administrative commands require root or the panel web user",
+        );
+    }
+
+    // A política npm vale para todas as contas do servidor: revendedor, que
+    // passa no teste acima, não a altera.
+    if matches!(
+        cli.command,
+        Commands::Admin {
+            command: AdminCommands::SaveNpmPolicy { .. }
+        }
+    ) && !sys::auth::caller_is_server_admin()
+    {
+        system_error(
+            "server_admin_required",
+            "only the server administrator changes the npm policy",
         );
     }
 
