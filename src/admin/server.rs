@@ -4,7 +4,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::sys::output::success;
-use crate::sys::state::PLUGIN_PATH;
+use crate::sys::state::{NpmPolicy, PLUGIN_PATH};
 
 use crate::app::{admin_get_status, with_debug};
 use crate::runtime::detect::detect_node_versions;
@@ -116,6 +116,45 @@ pub fn save_default_isolated(isolated: bool) -> Result<Value, (String, String)> 
     let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
 
     Ok(json!({ "isolated": isolated }))
+}
+
+/// Grava a política npm do servidor em `etc/npm_policy`.
+///
+/// Só o admin do servidor chega aqui (ver `caller_is_server_admin`): é uma
+/// política única, sem exceção por conta nem por revendedor.
+pub fn save_npm_policy(commands: &str, ignore_scripts: bool) -> Result<Value, (String, String)> {
+    let policy = NpmPolicy::from_request(commands, ignore_scripts);
+
+    let etc_dir = Path::new(PLUGIN_PATH).join("etc");
+    if !etc_dir.is_dir() {
+        std::fs::create_dir_all(&etc_dir).map_err(|e| {
+            (
+                "write_failed".into(),
+                format!("failed to create {}: {e}", etc_dir.display()),
+            )
+        })?;
+        let _ = std::fs::set_permissions(&etc_dir, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let file = etc_dir.join("npm_policy");
+    crate::sys::fs::atomic_write(&file, policy.to_file().as_bytes()).map_err(|e| {
+        (
+            "write_failed".into(),
+            format!("failed to write {}: {e}", file.display()),
+        )
+    })?;
+    // Legível por todos: quem consulta é a conta, depois da queda de privilégio.
+    // Do root, como o resto de `etc/`: o processo herda o grupo de quem chamou
+    // — a conta do admin —, e é o root quem responde por esta política.
+    let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+    let _ = crate::sys::fs::chown_path(&file, 0, 0);
+
+    Ok(policy.to_json())
+}
+
+/// A política npm em vigor, para a página do admin.
+pub fn cmd_npm_policy(dbg: Option<&Value>) -> ! {
+    success(with_debug(crate::sys::state::npm_policy().to_json(), dbg))
 }
 
 /// Persists the user-selected Node.js runtimes (by detection index) into

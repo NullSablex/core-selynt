@@ -98,6 +98,29 @@ correção.
 
 ### Added
 
+**Preset global da execução npm**
+- O admin do servidor escolhe quais comandos npm o painel oferece (`install`,
+  `update`, `ci`, `run`) e se `install`/`update`/`ci` rodam com
+  `--ignore-scripts`. Política única para o servidor, em `etc/npm_policy`;
+  sem o arquivo, vale o comportamento de antes: tudo liberado, scripts de
+  instalação desligados
+- `admin npm-policy` lê; `admin save-npm-policy` grava, e só para o admin do
+  servidor: o revendedor, que passa nos demais comandos `admin`, é recusado
+  com `server_admin_required`. O catálogo é fechado — o arquivo não acrescenta
+  comando que o core não conheça
+- `run-job` recusa comando desligado com `command_disabled`, e `scripts`
+  devolve a política para a tela oferecer só o que está liberado
+- Sem o script de instalação, pacote com build nativo (`bcrypt`, `sharp`
+  antigo, qualquer `binding.gyp`) instala sem erro e falha só no start, com
+  uma mensagem que não explica a causa. Ao fim de `install`/`update`/`ci`, o
+  job verifica a árvore instalada e lista em `skipped_builds` os pacotes
+  nativos sem nenhum addon `.node` compilado; pacote com binário pronto em
+  `prebuilds/` fica de fora
+- `skipped_reason` diz de quem é a saída: `ignore_scripts` quando o preset
+  bloqueou, `not_approved` quando foi o próprio npm — a partir do 11.17 o
+  script de uma dependência só roda se o projeto o aprovar em `allowScripts`
+  no `package.json`, e liberar no preset não basta
+
 **Execução de comandos npm pelo painel**
 - `run-job` executa `install`, `update`, `ci` e os scripts declarados no
   `package.json`; `job-status` devolve estado e log; `stop-job` interrompe.

@@ -575,7 +575,12 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     let pkg = PathBuf::from(&meta.cwd).join("package.json");
     let Ok(raw) = std::fs::read_to_string(&pkg) else {
         success(with_debug(
-            json!({ "scripts": Vec::<String>::new(), "deps": "unknown", "reason": "no_package_json" }),
+            json!({
+                "scripts": Vec::<String>::new(),
+                "deps": "unknown",
+                "reason": "no_package_json",
+                "policy": crate::sys::state::npm_policy().to_json(),
+            }),
             dbg,
         ));
     };
@@ -584,7 +589,12 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     // reporting "no scripts", which would read as if the file were fine.
     let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
         success(with_debug(
-            json!({ "scripts": Vec::<String>::new(), "deps": "unknown", "reason": "invalid_package_json" }),
+            json!({
+                "scripts": Vec::<String>::new(),
+                "deps": "unknown",
+                "reason": "invalid_package_json",
+                "policy": crate::sys::state::npm_policy().to_json(),
+            }),
             dbg,
         ));
     };
@@ -602,7 +612,17 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     names.sort();
 
     let deps = dependency_state(Path::new(&meta.cwd), &parsed);
-    success(with_debug(json!({ "scripts": names, "deps": deps }), dbg));
+    // A política vai junto: a tela só oferece o que o servidor libera, e sabe
+    // se os scripts de instalação estão desligados para explicar a falha de
+    // pacote nativo.
+    success(with_debug(
+        json!({
+            "scripts": names,
+            "deps": deps,
+            "policy": crate::sys::state::npm_policy().to_json(),
+        }),
+        dbg,
+    ));
 }
 
 /// Whether a `package.json` script name is safe to hand to `npm run`.
