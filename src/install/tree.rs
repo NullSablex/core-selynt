@@ -33,6 +33,13 @@ pub fn expected_mode(path: &Path) -> u32 {
     if (s.contains("/scripts/") && s.ends_with(".sh")) || s.contains("/hooks/") {
         return 0o755;
     }
+    // Os executáveis que o plugin distribui. Sem esta regra o `setup` deixava o
+    // bubblewrap em 644 a cada instalação, e sem ele o painel recusa todo app
+    // isolado e todo comando npm. O `core-selynt` também cai aqui, mas recebe
+    // o 4755 à parte, depois do chown que limparia o setuid.
+    if s.contains("/bin/") {
+        return 0o755;
+    }
     0o644
 }
 
@@ -95,6 +102,13 @@ mod tests {
         assert_eq!(expected_mode(Path::new("/x/admin/config")), 0o755);
         assert_eq!(expected_mode(Path::new("/x/scripts/install.sh")), 0o755);
         assert_eq!(expected_mode(Path::new("/x/hooks/anything")), 0o755);
+    }
+
+    /// O bubblewrap distribuído com o plugin tem de continuar executável depois
+    /// de cada instalação.
+    #[test]
+    fn bundled_binaries_are_executable() {
+        assert_eq!(expected_mode(Path::new("/x/bin/bwrap")), 0o755);
     }
 
     #[test]

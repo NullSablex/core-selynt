@@ -269,6 +269,13 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 ### Fixed
 
+**Instalação tirava a permissão de execução do bubblewrap**
+- O `setup` aplica a cada arquivo do plugin o modo que `expected_mode` dita, e
+  a regra não conhecia `bin/`: o `bwrap` distribuído com o plugin saía 644.
+  Na instalação seguinte o sandbox deixaria de funcionar, e com ele todo app
+  isolado e todo comando npm. O diagnóstico já acusava a divergência como
+  `permissions_bad`; o errado era a regra. `bin/` passa a ser 755
+
 **Aplicações respondiam 503 depois de uma atualização do `CustomBuild`**
 - Os handlers do proxy eram lidos por uma linha `include` acrescentada ao
   `httpd_config.conf`, arquivo que o `DirectAdmin` regenera. Uma atualização do
