@@ -109,7 +109,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-llvm-cov
 
@@ -117,7 +117,7 @@ jobs:
         run: cargo llvm-cov --target x86_64-unknown-linux-musl --lcov --output-path lcov.info
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-lcov
           path: lcov.info
