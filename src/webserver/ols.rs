@@ -67,22 +67,105 @@ pub fn main_conf() -> Option<PathBuf> {
 const INCLUDE_BEGIN: &str = "# BEGIN SELYNT_PANEL extProcessors include";
 const INCLUDE_END: &str = "# END SELYNT_PANEL extProcessors include";
 
-/// Makes sure `httpd_config.conf` pulls in the generated handler file.
+/// Name of the generated handler file, in either location.
+pub const HANDLERS_FILE: &str = "selynt_extprocessors.conf";
+
+/// Whether the main config already reads `conf.d/*.conf` on its own.
+///
+/// `DirectAdmin`'s template for `OpenLiteSpeed` includes that directory under
+/// "user configurations not maintained by `DirectAdmin`": a `CustomBuild` update
+/// regenerates `httpd_config.conf` but never touches what is dropped there.
+fn reads_drop_ins(conf_dir: &Path) -> bool {
+    conf_dir.join("conf.d").is_dir()
+        && std::fs::read_to_string(conf_dir.join("httpd_config.conf")).is_ok_and(|main| {
+            main.lines().any(|l| {
+                let l = l.trim();
+                l.starts_with("include") && l.ends_with("conf.d/*.conf")
+            })
+        })
+}
+
+/// Where the generated handlers belong.
+///
+/// In `conf.d/` whenever the main config reads it. Appending an include line to
+/// `httpd_config.conf` instead is what used to break: `DirectAdmin` owns that
+/// file, a `CustomBuild` update rewrote it, and every proxied app answered 503
+/// until someone ran `setup` again. The drop-in needs no line in a file the
+/// panel does not own. Older layouts without `conf.d` keep the include.
+pub fn handlers_path(conf_dir: &Path) -> PathBuf {
+    if reads_drop_ins(conf_dir) {
+        conf_dir.join("conf.d").join(HANDLERS_FILE)
+    } else {
+        conf_dir.join(HANDLERS_FILE)
+    }
+}
+
+/// Whether the web server reads the generated handlers at all.
+pub fn handlers_are_included(conf_dir: &Path) -> bool {
+    reads_drop_ins(conf_dir)
+        || std::fs::read_to_string(conf_dir.join("httpd_config.conf"))
+            .is_ok_and(|main| main.contains(HANDLERS_FILE))
+}
+
+/// Removes what the include-line layout left behind, once the drop-in is used.
+///
+/// Both at once would define every handler twice. Only the panel's own lines
+/// leave `httpd_config.conf`, and the file is rewritten only if one was there.
+/// Returns whether anything changed — the web server then needs a reload.
+pub fn retire_legacy_include(conf_dir: &Path) -> std::io::Result<bool> {
+    if !reads_drop_ins(conf_dir) {
+        return Ok(false);
+    }
+    let mut changed = false;
+    let main = conf_dir.join("httpd_config.conf");
+    let existing = std::fs::read_to_string(&main)?;
+    if existing.contains(HANDLERS_FILE) {
+        let kept = strip_legacy_include(&existing);
+        crate::sys::fs::atomic_write(&main, kept.as_bytes()).map_err(std::io::Error::other)?;
+        changed = true;
+    }
+    match std::fs::remove_file(conf_dir.join(HANDLERS_FILE)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(changed),
+        Err(e) => Err(e),
+    }
+}
+
+/// `httpd_config.conf` without the panel's include block.
+fn strip_legacy_include(content: &str) -> String {
+    content
+        .lines()
+        .filter(|l| {
+            let l = l.trim_end();
+            l != INCLUDE_BEGIN && l != INCLUDE_END && !l.contains(HANDLERS_FILE)
+        })
+        .fold(String::new(), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        })
+}
+
+/// Makes sure the web server reads the generated handler file.
 ///
 /// Without it the handlers exist on disk and the web server never reads them,
 /// so every proxied app answers 503 while looking perfectly healthy: the
 /// process runs, the socket accepts, and the marker is in place.
 ///
-/// Re-checked on every `setup` because `DirectAdmin` rewrites this file — a
-/// rebuild drops the line, and nothing else would put it back.
+/// Where `conf.d/` is read, there is nothing to add — only the old include
+/// to retire. Otherwise the include line goes into `httpd_config.conf`.
 fn ensure_include(conf_dir: &Path) -> std::io::Result<()> {
+    if reads_drop_ins(conf_dir) {
+        return retire_legacy_include(conf_dir).map(|_| ());
+    }
+
     let main = conf_dir.join("httpd_config.conf");
     let existing = std::fs::read_to_string(&main)?;
-    if existing.contains("selynt_extprocessors.conf") {
+    if existing.contains(HANDLERS_FILE) {
         return Ok(());
     }
 
-    let include = conf_dir.join("selynt_extprocessors.conf");
+    let include = conf_dir.join(HANDLERS_FILE);
     let block = format!(
         "\n{INCLUDE_BEGIN}\ninclude {}\n{INCLUDE_END}\n",
         include.display()
@@ -252,7 +335,83 @@ pub fn run() -> Result<Outcome, (String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BEGIN_MARK, END_MARK, upsert_block};
+    use super::{
+        BEGIN_MARK, END_MARK, HANDLERS_FILE, INCLUDE_BEGIN, INCLUDE_END, handlers_are_included,
+        handlers_path, retire_legacy_include, strip_legacy_include, upsert_block,
+    };
+
+    /// Uma árvore de configuração do OLS, com ou sem o `conf.d/` incluído.
+    fn layout(tag: &str, main: &str, drop_in_dir: bool) -> std::path::PathBuf {
+        let d = tmp(tag);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        if drop_in_dir {
+            std::fs::create_dir_all(d.join("conf.d")).unwrap();
+        }
+        std::fs::write(d.join("httpd_config.conf"), main).unwrap();
+        d
+    }
+
+    const DA_MAIN: &str = "include /etc/openlitespeed/httpd-defaults.conf\n\
+                           include /etc/openlitespeed/conf.d/*.conf\n";
+
+    /// Com o `conf.d/` lido pelo próprio `DirectAdmin`, os handlers vão para lá —
+    /// e não dependem de linha nenhuma num arquivo que o DA reescreve.
+    #[test]
+    fn handlers_go_to_the_drop_in_directory_when_it_is_read() {
+        let d = layout("dropin", DA_MAIN, true);
+        assert_eq!(handlers_path(&d), d.join("conf.d").join(HANDLERS_FILE));
+        assert!(handlers_are_included(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// O diretório existir não basta: sem o include dele, o servidor não o lê.
+    #[test]
+    fn a_drop_in_directory_nobody_includes_does_not_count() {
+        let d = layout("dropin-unread", "include /x/httpd-defaults.conf\n", true);
+        assert_eq!(handlers_path(&d), d.join(HANDLERS_FILE));
+        assert!(!handlers_are_included(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Migrando do layout antigo: sai o bloco do painel e o arquivo velho, e o
+    /// resto do `httpd_config.conf` fica intacto.
+    #[test]
+    fn the_legacy_include_is_retired_once_the_drop_in_is_used() {
+        let main = format!(
+            "{DA_MAIN}\n{INCLUDE_BEGIN}\ninclude /etc/openlitespeed/{HANDLERS_FILE}\n{INCLUDE_END}\n"
+        );
+        let d = layout("retire", &main, true);
+        std::fs::write(d.join(HANDLERS_FILE), "velho").unwrap();
+
+        assert!(retire_legacy_include(&d).unwrap());
+        let depois = std::fs::read_to_string(d.join("httpd_config.conf")).unwrap();
+        assert!(!depois.contains(HANDLERS_FILE));
+        assert!(!depois.contains(INCLUDE_BEGIN));
+        assert!(depois.contains("conf.d/*.conf"));
+        assert!(!d.join(HANDLERS_FILE).exists());
+
+        // Já limpo: nada muda, e o servidor não precisa recarregar.
+        assert!(!retire_legacy_include(&d).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Sem `conf.d/`, a limpeza não pode apagar o include de que o servidor
+    /// ainda depende.
+    #[test]
+    fn the_legacy_include_stays_where_there_is_no_drop_in() {
+        let main = format!("{INCLUDE_BEGIN}\ninclude /x/{HANDLERS_FILE}\n{INCLUDE_END}\n");
+        let d = layout("keep", &main, false);
+        assert!(!retire_legacy_include(&d).unwrap());
+        assert!(handlers_are_included(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stripping_keeps_foreign_lines() {
+        let s = format!("a\n{INCLUDE_BEGIN}\ninclude /x/{HANDLERS_FILE}\n{INCLUDE_END}\nb\n");
+        assert_eq!(strip_legacy_include(&s), "a\nb\n");
+    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("selynt-ols-{tag}-{}", std::process::id()))

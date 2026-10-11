@@ -269,6 +269,25 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 ### Fixed
 
+**Aplicações respondiam 503 depois de uma atualização do `CustomBuild`**
+- Os handlers do proxy eram lidos por uma linha `include` acrescentada ao
+  `httpd_config.conf`, arquivo que o `DirectAdmin` regenera. Uma atualização do
+  OpenLiteSpeed pelo `CustomBuild` reescreveu o arquivo, a linha sumiu, e toda
+  aplicação passou a responder 503 mesmo rodando — até alguém rodar `setup`
+- Os handlers passam a ficar em `conf.d/selynt_extprocessors.conf`, diretório
+  que o próprio template do `DirectAdmin` inclui para configuração local e que
+  o `CustomBuild` não reescreve. Nenhuma linha em arquivo alheio é necessária
+- Se o arquivo sumir mesmo assim, o `sync-proxy` (a cada 5s) o recria. Servidor
+  que recebe só o binário novo migra sozinho: o include antigo e o arquivo
+  antigo saem no primeiro sync. Layouts sem `conf.d/` mantêm o include
+
+**Visão do admin mostrava como RUNNING aplicação já morta**
+- `admin_get_status` conferia apenas se o pid estava vivo. Com a aplicação
+  morta, o número passa a outro processo, e a visão geral do admin mostrava
+  RUNNING enquanto a própria conta via STOPPED
+- Passa a fazer a mesma verificação anti-reuso do status da conta: dono do
+  processo e instante de início gravados no start
+
 **Glob de runtimes nunca casava com `/opt/alt/alt-nodejs*`**
 - `glob_paths` aceitava `*` apenas ocupando um componente inteiro do caminho,
   então o padrão do CloudLinux — onde o `*` fica no meio do nome — não casava
