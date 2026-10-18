@@ -326,6 +326,20 @@ pub fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
         .join("app.sock")
 }
 
+/// Apaga o socket com que o app subiu e o diretório dele, se ficar vazio.
+///
+/// O diretório é do app (`.sockets/<id>`, ou `.sockets/<nome>` no layout
+/// anterior): deixá-lo para trás acumulava pastas vazias a cada troca de
+/// layout. `remove_dir` só apaga diretório vazio, e o `.sockets` compartilhado
+/// nunca é alvo.
+pub fn remove_socket(state_dir: &Path, meta: &AppMeta) {
+    let socket = active_socket_path(state_dir, meta);
+    let _ = std::fs::remove_file(&socket);
+    if let Some(dir) = socket.parent().filter(|d| *d != state_dir.join(".sockets")) {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 /// Se o caminho cabe num `sockaddr_un`.
 pub fn socket_path_fits(path: &Path) -> bool {
     path.as_os_str().len() <= SUN_PATH_MAX
@@ -538,6 +552,35 @@ mod socket_path_tests {
         assert_eq!(id, socket_id("api"));
         assert_ne!(id, socket_id("api2"));
         assert_eq!(socket_id(&"z".repeat(64)).len(), 16);
+    }
+
+    /// A pasta do app sai junto com o socket; a `.sockets` compartilhada,
+    /// onde o layout antigo sem isolamento punha o socket direto, fica.
+    #[test]
+    fn removing_the_socket_takes_the_app_folder_but_not_the_shared_one() {
+        let base = std::env::temp_dir().join(format!("selynt-rmsock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let run = base.join(".run");
+        let sockets = base.join(".sockets");
+        std::fs::create_dir_all(&run).unwrap();
+
+        for (nome, socket) in [
+            ("novo", sockets.join("abc").join("app.sock")),
+            ("antigo", sockets.join("antigo.exemplo.com")),
+        ] {
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            std::fs::write(&socket, "").unwrap();
+            std::fs::write(
+                run.join(format!("{nome}.meta")),
+                format!("socket={}\n", socket.display()),
+            )
+            .unwrap();
+            super::remove_socket(&base, &meta(nome, "x.exemplo.com"));
+            assert!(!socket.exists(), "{nome}: o socket ficou");
+        }
+        assert!(!sockets.join("abc").exists(), "a pasta do app ficou");
+        assert!(sockets.is_dir(), "a pasta compartilhada foi apagada");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

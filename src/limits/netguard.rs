@@ -109,7 +109,7 @@ fn stop_offending_app(
 
     let run = state_dir.join(".run");
 
-    let _ = std::fs::remove_file(crate::sys::state::active_socket_path(state_dir, meta));
+    crate::sys::state::remove_socket(state_dir, meta);
 
     // Clear the run state so the panel reports STOPPED instead of a stale PID.
     for suffix in ["pid", "meta"] {

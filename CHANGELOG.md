@@ -280,7 +280,9 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 - O `add` recusa um nome cujo `<id>` coincida com o de outro app da conta
   (`socket_id_collision`), e o start recusa caminho que não caiba
   (`socket_path_too_long`) em vez de deixar o app sem escutar
-- Apps no ar mantêm o caminho com que subiram até o próximo restart
+- Apps no ar mantêm o caminho com que subiram até o próximo restart. O `stop`
+  passa a apagar também a pasta do socket do app, se ficar vazia — antes ela
+  ficava para trás a cada troca de layout
 
 **Handler do proxy definido duas vezes**
 - O template `CUSTOM.7` definia em cada vhost um handler com o mesmo nome do
