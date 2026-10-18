@@ -401,10 +401,27 @@ fn check_sandbox(r: &mut Report) {
 }
 
 /// Runs every check and returns the report plus a summary.
+/// O gancho que recusa porta fixa externa no `bind()`.
+///
+/// Sem slice não há app rodando, e o próximo start o prende antes de o app
+/// nascer — não é falha. Com slice e sem o programa, os apps estão rodando sem
+/// a regra, e o netguard voltou a derrubar clientes UDP: isso é falha.
+fn check_bindguard(r: &mut Report) {
+    use crate::limits::bindguard;
+    if !bindguard::slice_exists() {
+        r.add(Level::Pass, "install", "bindguard_idle", None);
+    } else if bindguard::active() {
+        r.add(Level::Pass, "install", "bindguard_ok", None);
+    } else {
+        r.add(Level::Fail, "install", "bindguard_missing", None);
+    }
+}
+
 pub fn run_diagnostic() -> Value {
     let mut r = Report::new();
     check_binary(&mut r);
     check_sandbox(&mut r);
+    check_bindguard(&mut r);
     check_ownership_and_modes(&mut r);
     check_identity_files(&mut r);
     check_state_dir(&mut r);

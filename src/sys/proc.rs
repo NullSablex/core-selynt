@@ -95,7 +95,11 @@ pub fn read_proc_snapshot(pid: u32) -> Option<ProcessSnapshot> {
 ///
 /// With `external_only`, loopback binds are ignored: an app is free to talk to
 /// itself, and only a port reachable from off the host bypasses the proxy.
-fn socket_inodes_are_bound(socket_inodes: &HashSet<u64>, external_only: bool) -> bool {
+fn socket_inodes_are_bound(
+    socket_inodes: &HashSet<u64>,
+    external_only: bool,
+    include_udp: bool,
+) -> bool {
     let extract_field = |line: &str, n: usize| -> Option<String> {
         line.split_whitespace().nth(n).map(ToString::to_string)
     };
@@ -106,12 +110,20 @@ fn socket_inodes_are_bound(socket_inodes: &HashSet<u64>, external_only: bool) ->
             .ok()
     };
 
-    // UDP has no LISTEN state, so any bound socket counts.
+    // UDP has no LISTEN state, so from here a service and a client look the
+    // same — any bound socket counts. Only used when the kernel-side bind guard
+    // is not in place; with it, a fixed external UDP port cannot exist and this
+    // rule would only kill clients (see `limits::bindguard`).
+    let udp: &[&str] = if include_udp {
+        &["/proc/net/udp", "/proc/net/udp6"]
+    } else {
+        &[]
+    };
     for (files, listen_only) in [
-        (["/proc/net/tcp", "/proc/net/tcp6"], true),
-        (["/proc/net/udp", "/proc/net/udp6"], false),
+        (&["/proc/net/tcp", "/proc/net/tcp6"][..], true),
+        (udp, false),
     ] {
-        for f in &files {
+        for f in files {
             let Ok(content) = std::fs::read_to_string(f) else {
                 continue;
             };
@@ -204,7 +216,10 @@ fn read_proc_ppid(pid: u32) -> Option<u32> {
 /// covers the app's own process, so a child spawned without it — or an app that
 /// is not Node at all — can bind freely. Passing every PID in the app's cgroup
 /// closes that path.
-pub fn has_external_listen(pids: &[u32]) -> bool {
+///
+/// `include_udp` is whether UDP sockets count: true only when the bind guard
+/// is not attached — see [`socket_inodes_are_bound`].
+pub fn has_external_listen(pids: &[u32], include_udp: bool) -> bool {
     let mut socket_inodes: HashSet<u64> = HashSet::new();
     for &pid in pids {
         socket_inodes.extend(socket_inodes_of(pid));
@@ -212,7 +227,7 @@ pub fn has_external_listen(pids: &[u32]) -> bool {
     if socket_inodes.is_empty() {
         return false;
     }
-    socket_inodes_are_bound(&socket_inodes, true)
+    socket_inodes_are_bound(&socket_inodes, true, include_udp)
 }
 
 #[cfg(test)]
