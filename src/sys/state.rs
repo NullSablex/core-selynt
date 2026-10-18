@@ -290,19 +290,45 @@ pub fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
         .map_or_else(|| socket_path_for(state_dir, meta), PathBuf::from)
 }
 
-/// Where an app's Unix socket lives.
+/// Maior caminho que cabe em `sockaddr_un.sun_path` (108 bytes com o NUL).
 ///
-/// Isolated, each app gets a subdirectory of its own: the sandbox binds only
-/// that one into the mount namespace, so a sibling's socket is absent rather
-/// than merely unreadable. It stays a real file on the host either way — the
-/// proxy has to reach it.
-pub fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
-    let sockets = state_dir.join(".sockets");
-    if account_is_isolated(state_dir) {
-        sockets.join(&meta.name).join(&meta.host)
-    } else {
-        sockets.join(&meta.host)
+/// É ABI do kernel, não escolha do painel: nenhum processo faz `bind()` ou
+/// `connect()` num socket Unix de caminho maior. O app escuta neste caminho e
+/// o servidor web conecta nele, então os dois lados falhariam.
+pub const SUN_PATH_MAX: usize = 107;
+
+/// Identificador de tamanho fixo do diretório de socket de um app.
+///
+/// O caminho já foi montado com o nome do app e o domínio — até 64 e 253
+/// caracteres —, e passava do limite de `sun_path` sem nenhum aviso: o app
+/// nunca ficava pronto e o proxy respondia 503. Aqui o nome entra num hash
+/// FNV-1a de 64 bits, e o caminho fica com tamanho constante. A unicidade
+/// dentro da conta é verificada no `add`, não presumida.
+pub fn socket_id(name: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
     }
+    format!("{h:016x}")
+}
+
+/// Where an app's Unix socket lives: `.sockets/<id>/app.sock`.
+///
+/// Um diretório por app, com ou sem isolamento: isolado, o sandbox monta só
+/// esse diretório no namespace, e o socket de um vizinho nem existe ali. O
+/// arquivo continua real no host — o proxy precisa alcançá-lo. Nada de tamanho
+/// variável entra no caminho além do diretório de estado da conta.
+pub fn socket_path_for(state_dir: &Path, meta: &AppMeta) -> PathBuf {
+    state_dir
+        .join(".sockets")
+        .join(socket_id(&meta.name))
+        .join("app.sock")
+}
+
+/// Se o caminho cabe num `sockaddr_un`.
+pub fn socket_path_fits(path: &Path) -> bool {
+    path.as_os_str().len() <= SUN_PATH_MAX
 }
 
 pub fn load_app_meta(state_dir: &Path, name: &str) -> Result<AppMeta> {
@@ -460,5 +486,64 @@ mod npm_policy_tests {
             assert!(p.ignore_scripts, "{v:?} não deveria liberar os scripts");
         }
         assert!(!parse_npm_policy(Some("ignore_scripts=0\n")).ignore_scripts);
+    }
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    use super::{AppMeta, SUN_PATH_MAX, socket_id, socket_path_fits, socket_path_for};
+    use std::path::Path;
+
+    fn meta(name: &str, host: &str) -> AppMeta {
+        AppMeta {
+            name: name.to_string(),
+            app_type: "node".to_string(),
+            cwd: "/home/bob/apps/x".to_string(),
+            entry: "index.js".to_string(),
+            host: host.to_string(),
+            domain: String::new(),
+            subdomain: String::new(),
+            node_version: String::new(),
+            created_at: None,
+            memory_max: None,
+        }
+    }
+
+    /// O pior caso que o painel aceita — nome de 64 e domínio de 253 — cabe
+    /// com folga. Antes, só o nome já passava do limite.
+    #[test]
+    fn the_longest_name_and_host_still_fit() {
+        let state = Path::new("/var/lib/selynt_panel/uma-conta-de-nome-longo");
+        let m = meta(&"a".repeat(64), &format!("{}.exemplo.com", "b".repeat(240)));
+        let p = socket_path_for(state, &m);
+        assert!(socket_path_fits(&p), "{} bytes", p.as_os_str().len());
+        assert!(p.as_os_str().len() < SUN_PATH_MAX - 20);
+    }
+
+    /// O domínio não entra no caminho: trocar o host não move o socket.
+    #[test]
+    fn the_host_does_not_shape_the_path() {
+        let state = Path::new("/var/lib/selynt_panel/bob");
+        assert_eq!(
+            socket_path_for(state, &meta("api", "a.exemplo.com")),
+            socket_path_for(state, &meta("api", "outro.exemplo.org"))
+        );
+    }
+
+    #[test]
+    fn the_id_is_fixed_size_and_stable() {
+        let id = socket_id("api");
+        assert_eq!(id.len(), 16);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(id, socket_id("api"));
+        assert_ne!(id, socket_id("api2"));
+        assert_eq!(socket_id(&"z".repeat(64)).len(), 16);
+    }
+
+    #[test]
+    fn a_path_over_the_kernel_limit_is_refused() {
+        let longo = format!("/{}", "x".repeat(SUN_PATH_MAX));
+        assert!(!socket_path_fits(Path::new(&longo)));
+        assert!(socket_path_fits(Path::new(&longo[..SUN_PATH_MAX])));
     }
 }

@@ -75,6 +75,23 @@ pub fn create_for_add(
         ));
     }
 
+    // O diretório de socket vem de um hash do nome: dois apps da conta não
+    // podem cair no mesmo, senão um apagaria o socket do outro. Improvável com
+    // 64 bits, mas é verificado, não presumido.
+    let id = crate::sys::state::socket_id(args.name);
+    if let Some(outro) = crate::sys::state::list_app_names(state_dir)
+        .into_iter()
+        .find(|n| n != args.name && crate::sys::state::socket_id(n) == id)
+    {
+        return Err((
+            "socket_id_collision".into(),
+            format!(
+                "app '{}' maps to the same socket directory as '{outro}'",
+                args.name
+            ),
+        ));
+    }
+
     // Check the working directory *before* writing anything.
     //
     // `cmd_add` validates too, but only after the drop — by then this has

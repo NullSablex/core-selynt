@@ -59,6 +59,27 @@ fn app_has_external_port(username: &str, name: &str, pid: u32) -> bool {
     has_external_listen(&pids)
 }
 
+/// O caminho do socket do app, recusando o start se não couber num
+/// `sockaddr_un`.
+///
+/// Com o caminho de tamanho fixo isto só acontece com um diretório de estado
+/// absurdamente longo — mas, se acontecer, o erro tem de dizer o motivo. Antes
+/// o app subia, nunca conseguia escutar, e o painel só via "não ficou pronto".
+fn checked_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
+    let path = socket_path_for(state_dir, meta);
+    if !crate::sys::state::socket_path_fits(&path) {
+        system_error(
+            "socket_path_too_long",
+            &format!(
+                "socket path has {} bytes; Unix sockets allow at most {}",
+                path.as_os_str().len(),
+                crate::sys::state::SUN_PATH_MAX
+            ),
+        );
+    }
+    path
+}
+
 /// Kills the app and fails the start if it bound a reachable port.
 ///
 /// Checked once the socket is up: an app can open a port at any point during
@@ -129,7 +150,7 @@ pub fn cmd_start(
         success(with_debug(json!({ "pid": pid }), dbg));
     }
 
-    let socket_path = socket_path_for(state_dir, &meta);
+    let socket_path = checked_socket_path(state_dir, &meta);
     let marker_path = state_dir.join(".proxy").join(&meta.host);
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&marker_path);
@@ -192,7 +213,7 @@ pub fn spawn_into_scope(
     if !crate::limits::policy::can_run_scopes() {
         return None;
     }
-    let socket_path = socket_path_for(state_dir, meta);
+    let socket_path = checked_socket_path(state_dir, meta);
     let _ = std::fs::remove_file(&socket_path);
 
     // Resolve the cap here, in the root prelude: it needs the account's
