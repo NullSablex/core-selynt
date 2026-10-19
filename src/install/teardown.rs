@@ -145,6 +145,9 @@ fn run() -> Value {
 
     let stopped = stop_all_apps();
 
+    // Com os apps parados, o gancho de bind não protege mais nada.
+    let bindguard_detached = crate::limits::bindguard::detach().is_ok();
+
     // After the apps are down: the state directory is where their sockets and
     // metadata live, and stopping reads from it.
     let _ = std::fs::remove_dir_all(STATE_BASE);
@@ -172,6 +175,7 @@ fn run() -> Value {
         "vhosts_rebuilt": vhosts_rebuilt,
         "web_server_reloaded": reloaded,
         "config_cleanup_failures": config_failures,
+        "bindguard_detached": bindguard_detached,
     })
 }
 

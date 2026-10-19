@@ -208,12 +208,20 @@ pub fn run() -> Result<Value, (String, String)> {
     // right permissions before systemd is told to run it.
     let units = super::units::install();
 
+    // Prende de novo o gancho de bind: uma atualização do binário traz o
+    // programa novo, e é aqui que ele substitui o anterior.
+    let bindguard = crate::limits::bindguard::ensure(true).map_or_else(
+        |e| json!({ "ok": false, "message": format!("{e:#}") }),
+        |()| json!({ "ok": true }),
+    );
+
     Ok(json!({
         "da_user": ids.da_user,
         "da_uid": ids.da_uid,
         "cgi_user": ids.cgi_user,
         "ols": ols,
         "units": units.len(),
+        "bindguard": bindguard,
     }))
 }
 
