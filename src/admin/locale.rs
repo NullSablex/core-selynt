@@ -66,8 +66,6 @@ pub fn set_locale_user(
 /// Writes a validated locale to `path` (0644) or removes it when `locale` is
 /// empty. Returns the stored code (`""` once cleared).
 fn write_locale(path: &Path, locale: &str) -> Result<String, (String, String)> {
-    use std::os::unix::fs::PermissionsExt;
-
     if locale.trim().is_empty() {
         match std::fs::remove_file(path) {
             Ok(()) => Ok(String::new()),
@@ -79,13 +77,15 @@ fn write_locale(path: &Path, locale: &str) -> Result<String, (String, String)> {
         }
     } else {
         let code = validate_locale(locale).ok_or_else(invalid_locale_err)?;
-        std::fs::write(path, format!("{code}\n")).map_err(|e| {
+        // Grava pelo caminho que não segue symlink: no locale da conta isto
+        // roda como root, no diretório de estado dela.
+        crate::sys::fs::atomic_write(path, format!("{code}\n").as_bytes()).map_err(|e| {
             (
                 "write_failed".into(),
-                format!("failed to write {}: {e}", path.display()),
+                format!("failed to write {}: {e:#}", path.display()),
             )
         })?;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+        let _ = crate::sys::fs::set_perm(path, 0o644);
         Ok(code)
     }
 }

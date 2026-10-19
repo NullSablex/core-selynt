@@ -9,6 +9,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ### Security
 
+**Gravações do lado root seguiam symlink em pastas da conta**
+- Parte do trabalho do binário roda como root antes da queda de privilégio e
+  grava em pastas onde a conta também escreve (`.run/`, o diretório de estado,
+  a pasta `logs` do app). A escrita atômica criava o temporário com nome fixo e
+  seguindo symlink, e `chmod`/`chown` também seguiam: um link plantado pela
+  conta redirecionava a operação para fora da árvore dela
+- O temporário passa a ter nome imprevisível e nasce com
+  `O_EXCL | O_NOFOLLOW`; `chmod`/`chown` abrem o caminho sem seguir link e agem
+  pelo descritor (`fchmod`/`fchown`), recusando o que não for arquivo comum ou
+  diretório. O `chown` recursivo do estado só desce em diretório real e pula
+  socket, link e FIFO. Logs, rotação de log e preferência de idioma passam pelo
+  mesmo caminho
+
 As falhas abaixo têm a mesma causa: o binário é setuid root e executável por
 qualquer um, mas confiava em valores fornecidos pelo próprio chamador —
 variáveis de ambiente e caminhos. Qualquer conta local em servidor compartilhado
