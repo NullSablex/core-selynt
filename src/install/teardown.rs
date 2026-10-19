@@ -33,56 +33,6 @@ fn stop_all_apps() -> usize {
     stopped
 }
 
-/// Removes the panel's block from a template, deleting the file if nothing else
-/// was in it.
-///
-/// A template can hold customisations that are not ours, and those have to
-/// outlive the uninstall.
-fn strip_block(path: &Path) -> Option<&'static str> {
-    let content = std::fs::read_to_string(path).ok()?;
-
-    let mut kept = String::new();
-    let mut inside = false;
-    for line in content.lines() {
-        if line.trim_end() == crate::webserver::ols::BEGIN_MARK {
-            inside = true;
-            continue;
-        }
-        if line.trim_end() == crate::webserver::ols::END_MARK {
-            inside = false;
-            continue;
-        }
-        if !inside {
-            kept.push_str(line);
-            kept.push('\n');
-        }
-    }
-
-    // Report what actually happened, not what was attempted: a template the
-    // uninstall could not rewrite still carries the panel's block, and saying
-    // "stripped" would leave the admin believing the server was left clean.
-    if kept.trim().is_empty() {
-        match std::fs::remove_file(path) {
-            Ok(()) => Some("removed"),
-            Err(e) => {
-                crate::sys::output::debug(format!("teardown: {} not removed: {e}", path.display()));
-                Some("remove_failed")
-            }
-        }
-    } else {
-        match crate::sys::fs::atomic_write(path, kept.as_bytes()) {
-            Ok(()) => Some("stripped"),
-            Err(e) => {
-                crate::sys::output::debug(format!(
-                    "teardown: {} not stripped: {e:#}",
-                    path.display()
-                ));
-                Some("strip_failed")
-            }
-        }
-    }
-}
-
 /// Drops the panel's include line and its generated handler file.
 ///
 /// Returns whatever could not be cleaned. The include line points at a file
@@ -157,7 +107,7 @@ fn run() -> Value {
         .iter()
         .filter_map(|n| {
             let path = custom.join(format!("openlitespeed_vhost.conf.CUSTOM.{n}.pre"));
-            strip_block(&path).map(|what| format!("CUSTOM.{n}: {what}"))
+            crate::webserver::ols::strip_block(&path).map(|what| format!("CUSTOM.{n}: {what}"))
         })
         .collect();
 

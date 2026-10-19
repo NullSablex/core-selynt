@@ -438,6 +438,17 @@ fn remove_run_state(state_dir: &Path, name: &str, meta: &AppMeta) {
 
     let _ = std::fs::remove_file(&active_socket);
     let _ = std::fs::remove_file(crate::sys::state::socket_path_for(state_dir, meta));
+    // O diretório do layout atual e o do anterior (`.sockets/<nome>`), que um
+    // app criado antes da troca ainda pode ter deixado.
+    if let Some(dir) = crate::sys::state::socket_path_for(state_dir, meta).parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    if let Some(dir) = active_socket
+        .parent()
+        .filter(|d| *d != state_dir.join(".sockets"))
+    {
+        let _ = std::fs::remove_dir(dir);
+    }
     let _ = std::fs::remove_dir(state_dir.join(".sockets").join(name));
     let _ = std::fs::remove_file(state_dir.join(".proxy").join(&meta.host));
 }

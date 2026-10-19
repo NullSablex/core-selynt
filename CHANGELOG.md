@@ -288,6 +288,29 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
   gancho não vê, `listen()` TCP sem `bind()`. Sem ele, volta à regra antiga e
   o diagnóstico acusa `bindguard_missing`
 
+**Caminho do socket podia passar do limite do kernel, em silêncio**
+- O socket ficava em `.sockets/<app>/<domínio>`: com nome de até 64 e domínio
+  de até 253 caracteres, o caminho passava dos 107 bytes que cabem num
+  `sockaddr_un`. O app subia, não conseguia escutar, e o proxy respondia 503 —
+  sem nenhum erro dizendo por quê
+- Passa a ser `.sockets/<id>/app.sock`, com `<id>` de 16 caracteres hex (hash
+  FNV-1a do nome): o caminho tem tamanho constante e nada de tamanho variável
+  entra nele além do diretório da conta. O mesmo layout com e sem isolamento
+- O `add` recusa um nome cujo `<id>` coincida com o de outro app da conta
+  (`socket_id_collision`), e o start recusa caminho que não caiba
+  (`socket_path_too_long`) em vez de deixar o app sem escutar
+- Apps no ar mantêm o caminho com que subiram até o próximo restart. O `stop`
+  passa a apagar também a pasta do socket do app, se ficar vazia — antes ela
+  ficava para trás a cada troca de layout
+
+**Handler do proxy definido duas vezes**
+- O template `CUSTOM.7` definia em cada vhost um handler com o mesmo nome do
+  que o `sync-proxy` gera, mas com caminho montado do domínio — que, com
+  isolamento, nem existia. Nunca era o que valia, e definia handler até para
+  domínio sem app. Sai: o `setup` remove o bloco do painel do `CUSTOM.7`, e o
+  handler passa a existir só no arquivo do `sync-proxy`, a partir do caminho
+  real. O diagnóstico avisa `templates_legacy` enquanto o resto não sair
+
 **Instalação tirava a permissão de execução do bubblewrap**
 - O `setup` aplica a cada arquivo do plugin o modo que `expected_mode` dita, e
   a regra não conhecia `bin/`: o `bwrap` distribuído com o plugin saía 644.

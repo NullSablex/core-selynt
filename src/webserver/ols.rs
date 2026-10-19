@@ -17,26 +17,13 @@ use crate::sys::state::{DA_TEMPLATES, PLUGIN_PATH, STATE_BASE};
 pub const BEGIN_MARK: &str = "# BEGIN SELYNT_PANEL";
 pub const END_MARK: &str = "# END SELYNT_PANEL";
 
-/// Per-vhost proxy handler, pointing at the app's Unix socket.
+/// Routes to the app's handler, but only while the app's proxy marker exists.
 ///
-/// `|SDOMAIN|`, `|VH_PORT|` and `|USER|` are `DirectAdmin` template variables,
-/// substituted when it generates each vhost.
-const TEMPLATE_CUSTOM_7: &str = "\
-# BEGIN SELYNT_PANEL
-extprocessor selynt_proxy-|SDOMAIN|-|VH_PORT| {
-  type                    proxy
-  address                 uds:///var/lib/selynt_panel/|USER|/.sockets/|SDOMAIN|
-  maxConns                35
-  initTimeout             60
-  retryTimeout            0
-  persistConn             1
-  respBuffer              0
-  autoStart               0
-  instances               1
-}
-# END SELYNT_PANEL";
-
-/// Routes to the handler above, but only while the app's proxy marker exists.
+/// The handler itself (`selynt_proxy-<host>-<port>`) is defined once, in the
+/// file `sync-proxy` writes from the socket path each app actually started
+/// with. It used to be defined here too, per vhost, with a path built from the
+/// domain — a second source of truth that pointed at sockets that no longer
+/// existed and was never the one in effect.
 ///
 /// Without that condition every request to the domain would be proxied, so a
 /// stopped app would break the site instead of falling through to PHP or static
@@ -174,6 +161,56 @@ fn ensure_include(conf_dir: &Path) -> std::io::Result<()> {
         .map_err(std::io::Error::other)
 }
 
+/// Removes the panel's block from a template, deleting the file if nothing else
+/// was in it.
+///
+/// A template can hold customisations that are not ours, and those have to
+/// outlive the uninstall.
+pub fn strip_block(path: &Path) -> Option<&'static str> {
+    let content = std::fs::read_to_string(path).ok()?;
+
+    let mut kept = String::new();
+    let mut inside = false;
+    for line in content.lines() {
+        if line.trim_end() == BEGIN_MARK {
+            inside = true;
+            continue;
+        }
+        if line.trim_end() == END_MARK {
+            inside = false;
+            continue;
+        }
+        if !inside {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+
+    // Report what actually happened, not what was attempted: a template the
+    // uninstall could not rewrite still carries the panel's block, and saying
+    // "stripped" would leave the admin believing the server was left clean.
+    if kept.trim().is_empty() {
+        match std::fs::remove_file(path) {
+            Ok(()) => Some("removed"),
+            Err(e) => {
+                crate::sys::output::debug(format!("teardown: {} not removed: {e}", path.display()));
+                Some("remove_failed")
+            }
+        }
+    } else {
+        match crate::sys::fs::atomic_write(path, kept.as_bytes()) {
+            Ok(()) => Some("stripped"),
+            Err(e) => {
+                crate::sys::output::debug(format!(
+                    "teardown: {} not stripped: {e:#}",
+                    path.display()
+                ));
+                Some("strip_failed")
+            }
+        }
+    }
+}
+
 /// Replaces the panel's block in a template, leaving anything else in place.
 fn upsert_block(path: &Path, block: &str) -> std::io::Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -294,9 +331,11 @@ pub fn run() -> Result<Outcome, (String, String)> {
         let seven = custom.join("openlitespeed_vhost.conf.CUSTOM.7.pre");
         let five = custom.join("openlitespeed_vhost.conf.CUSTOM.5.pre");
 
-        upsert_block(&seven, TEMPLATE_CUSTOM_7)
-            .and_then(|()| upsert_block(&five, TEMPLATE_CUSTOM_5))
+        upsert_block(&five, TEMPLATE_CUSTOM_5)
             .map_err(|e| ("template_write_failed".to_string(), format!("{e:#}")))?;
+        // Instalações anteriores definiam o handler também aqui. Sai o bloco do
+        // painel; o que for de terceiros no mesmo arquivo fica.
+        let _ = strip_block(&seven);
         true
     } else {
         false
