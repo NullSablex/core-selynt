@@ -311,6 +311,14 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
   handler passa a existir só no arquivo do `sync-proxy`, a partir do caminho
   real. O diagnóstico avisa `templates_legacy` enquanto o resto não sair
 
+**Aplicação TypeScript subia num Node que não a executa**
+- O Node só remove tipos sem flag a partir do 22.18.0 e do 23.6.0. Com uma
+  entrada `.ts`/`.mts`/`.cts` num Node anterior, o app subia e morria com
+  `ERR_UNKNOWN_FILE_EXTENSION`, e o painel só via "não ficou pronto"
+- O start recusa antes de o processo nascer, com `typescript_unsupported`
+  dizendo a versão e o que fazer. A versão vem de `etc/node_versions`, sem
+  executar o runtime; versão desconhecida não bloqueia
+
 **Instalação tirava a permissão de execução do bubblewrap**
 - O `setup` aplica a cada arquivo do plugin o modo que `expected_mode` dita, e
   a regra não conhecia `bin/`: o `bwrap` distribuído com o plugin saía 644.

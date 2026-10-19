@@ -80,6 +80,25 @@ fn checked_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
     path
 }
 
+/// Recusa subir uma entrada TypeScript num Node que não a executa.
+///
+/// Antes de o processo nascer: o Node 20, por exemplo, sobe e morre com
+/// `ERR_UNKNOWN_FILE_EXTENSION`, e o painel só via "não ficou pronto". Aqui o
+/// erro diz a versão e o que fazer.
+fn refuse_unsupported_typescript(meta: &AppMeta) {
+    if meta.app_type != "node" {
+        return;
+    }
+    let node = if meta.node_version.is_empty() {
+        crate::runtime::detect::default_node_path().unwrap_or_default()
+    } else {
+        meta.node_version.clone()
+    };
+    if let Some(msg) = crate::runtime::node::typescript_refusal(&meta.entry, &node) {
+        user_error("typescript_unsupported", &msg);
+    }
+}
+
 /// Kills the app and fails the start if it bound a reachable port.
 ///
 /// Checked once the socket is up: an app can open a port at any point during
@@ -149,6 +168,7 @@ pub fn cmd_start(
     if status == "RUNNING" {
         success(with_debug(json!({ "pid": pid }), dbg));
     }
+    refuse_unsupported_typescript(&meta);
 
     let socket_path = checked_socket_path(state_dir, &meta);
     let marker_path = state_dir.join(".proxy").join(&meta.host);
@@ -210,6 +230,7 @@ pub fn spawn_into_scope(
     uid: u32,
     gid: u32,
 ) -> Option<u32> {
+    refuse_unsupported_typescript(meta);
     if !crate::limits::policy::can_run_scopes() {
         return None;
     }
