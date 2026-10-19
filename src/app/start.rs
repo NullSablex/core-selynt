@@ -256,14 +256,10 @@ pub fn spawn_into_scope(
 /// Each run starts empty: the panel shows what the app is saying *now*, and
 /// keeping the previous run's output made fixed errors look current.
 fn open_log_files(cwd: &Path, name: &str) -> (std::fs::File, std::fs::File) {
+    // Roda ainda como root, numa pasta da conta: nada aqui segue symlink.
     let open = |path: &Path, which: &str| {
         rotate_log_if_needed(path);
-        let _ = std::fs::write(path, b"");
-        match std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)
-        {
+        match crate::sys::fs::open_log_nofollow(path, true) {
             Ok(f) => f,
             Err(e) => system_error("log_open_failed", &format!("{which} log: {e:#}")),
         }

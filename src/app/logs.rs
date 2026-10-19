@@ -107,7 +107,12 @@ pub(super) fn read_tail(path: &Path, n: usize) -> Vec<String> {
 /// Truncates a log file to the last `LOG_ROTATE_KEEP_LINES` lines when it
 /// grows past `LOG_ROTATE_MAX_BYTES`.
 pub(super) fn rotate_log_if_needed(path: &Path) {
-    let size = std::fs::metadata(path).map_or(0, |m| m.len());
+    // Só arquivo comum: um link no lugar do log levaria o lado root a ler e
+    // copiar o conteúdo do alvo para dentro do log da conta.
+    let size = std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|m| m.file_type().is_file())
+        .map_or(0, |m| m.len());
     if size <= LOG_ROTATE_MAX_BYTES {
         return;
     }

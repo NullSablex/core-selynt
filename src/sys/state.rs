@@ -87,24 +87,16 @@ pub fn init_state_dir(state_dir: &Path, uid: u32, gid: u32) -> Result<()> {
 /// privilege drop so the app can write logs after dropping.
 pub fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
     let logs_dir = cwd.join("logs");
-    if !logs_dir.is_dir() {
-        std::fs::create_dir_all(&logs_dir)
-            .with_context(|| format!("mkdir {}", logs_dir.display()))?;
+    // Roda como root, na pasta da conta: um link no lugar de `logs` levaria o
+    // chown e o chmod abaixo para outro lugar. Só diretório de verdade.
+    if std::fs::symlink_metadata(&logs_dir).is_err() {
+        std::fs::create_dir(&logs_dir).with_context(|| format!("mkdir {}", logs_dir.display()))?;
     }
-    let logs_str = logs_dir
-        .to_str()
-        .with_context(|| format!("non-UTF8 path {}", logs_dir.display()))?;
-    let cpath = std::ffi::CString::new(logs_str)
-        .with_context(|| format!("invalid path {}", logs_dir.display()))?;
-    if unsafe { libc::chown(cpath.as_ptr(), uid, gid) } != 0 {
-        anyhow::bail!(
-            "chown {} to {uid}:{gid}: {}",
-            logs_dir.display(),
-            std::io::Error::last_os_error()
-        );
+    if !crate::sys::fs::is_real_dir(&logs_dir) {
+        anyhow::bail!("{} is not a directory", logs_dir.display());
     }
-    std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o750))
-        .with_context(|| format!("chmod 750 {}", logs_dir.display()))?;
+    chown_path(&logs_dir, uid, gid)?;
+    crate::sys::fs::set_perm(&logs_dir, 0o750)?;
 
     // The log files themselves, not just the directory: they are created while
     // still root, in the prelude, so they would be left root-owned and the app
@@ -112,7 +104,7 @@ pub fn init_app_logs_dir(cwd: &Path, uid: u32, gid: u32) -> Result<()> {
     if let Ok(entries) = std::fs::read_dir(&logs_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_file() {
+            if crate::sys::fs::is_regular_file(&p) {
                 let _ = chown_path(&p, uid, gid);
             }
         }
