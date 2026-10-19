@@ -319,19 +319,22 @@ fn check_proxy_config(r: &mut Report) {
 }
 
 fn check_templates(r: &mut Report) {
-    let missing = ["5", "7"]
-        .iter()
-        .filter(|n| {
-            !Path::new(&format!(
-                "{DA_TEMPLATES}/custom/openlitespeed_vhost.conf.CUSTOM.{n}.pre"
-            ))
-            .is_file()
-        })
-        .count();
-    if missing == 0 {
-        r.add(Level::Pass, "proxy", "templates_ok", None);
-    } else {
+    let custom = Path::new(DA_TEMPLATES).join("custom");
+    let read = |n: &str| {
+        std::fs::read_to_string(custom.join(format!("openlitespeed_vhost.conf.CUSTOM.{n}.pre")))
+            .unwrap_or_default()
+    };
+    // O que roteia é o bloco do painel no CUSTOM.5; o handler vive no arquivo
+    // do `sync-proxy`. Um bloco do painel no CUSTOM.7 é resto de instalação
+    // antiga: define o handler uma segunda vez, com caminho montado do domínio.
+    let routing = read("5").contains(crate::webserver::ols::BEGIN_MARK);
+    let legacy = read("7").contains(crate::webserver::ols::BEGIN_MARK);
+    if !routing {
         r.add(Level::Fail, "proxy", "templates_missing", None);
+    } else if legacy {
+        r.add(Level::Warn, "proxy", "templates_legacy", None);
+    } else {
+        r.add(Level::Pass, "proxy", "templates_ok", None);
     }
 }
 
@@ -401,10 +404,27 @@ fn check_sandbox(r: &mut Report) {
 }
 
 /// Runs every check and returns the report plus a summary.
+/// O gancho que recusa porta fixa externa no `bind()`.
+///
+/// Sem slice não há app rodando, e o próximo start o prende antes de o app
+/// nascer — não é falha. Com slice e sem o programa, os apps estão rodando sem
+/// a regra, e o netguard voltou a derrubar clientes UDP: isso é falha.
+fn check_bindguard(r: &mut Report) {
+    use crate::limits::bindguard;
+    if !bindguard::slice_exists() {
+        r.add(Level::Pass, "install", "bindguard_idle", None);
+    } else if bindguard::active() {
+        r.add(Level::Pass, "install", "bindguard_ok", None);
+    } else {
+        r.add(Level::Fail, "install", "bindguard_missing", None);
+    }
+}
+
 pub fn run_diagnostic() -> Value {
     let mut r = Report::new();
     check_binary(&mut r);
     check_sandbox(&mut r);
+    check_bindguard(&mut r);
     check_ownership_and_modes(&mut r);
     check_identity_files(&mut r);
     check_state_dir(&mut r);

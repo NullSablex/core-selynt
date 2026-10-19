@@ -200,7 +200,7 @@ pub fn stop_internal(state_dir: &Path, name: &str, meta: &AppMeta, timeout_secs:
         }
     }
 
-    let _ = std::fs::remove_file(crate::sys::state::active_socket_path(state_dir, meta));
+    crate::sys::state::remove_socket(state_dir, meta);
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.pid")));
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.meta")));
 }

@@ -4,6 +4,7 @@
 //! where its memory ceiling applies, and how [`netguard`] finds every process
 //! it spawned — including children the panel never saw start.
 
+pub mod bindguard;
 pub mod netguard;
 pub mod policy;
 pub mod sandbox;

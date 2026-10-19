@@ -28,6 +28,9 @@ const STOP_TIMEOUT_SECS: u64 = 5;
 /// account's processes.
 pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
     let mut stopped = Vec::new();
+    // Com o gancho de bind no kernel, porta UDP fixa externa não chega a
+    // existir; contar UDP aqui só derrubaria clientes UDP legítimos.
+    let udp_counts = !super::bindguard::active();
 
     for name in list_app_names(state_dir) {
         let Ok(meta) = load_app_meta(state_dir, &name) else {
@@ -37,7 +40,7 @@ pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
         if pids.is_empty() {
             continue;
         }
-        if !has_external_listen(&pids) {
+        if !has_external_listen(&pids, udp_counts) {
             continue;
         }
 
@@ -109,7 +112,7 @@ fn stop_offending_app(
 
     let run = state_dir.join(".run");
 
-    let _ = std::fs::remove_file(crate::sys::state::active_socket_path(state_dir, meta));
+    crate::sys::state::remove_socket(state_dir, meta);
 
     // Clear the run state so the panel reports STOPPED instead of a stale PID.
     for suffix in ["pid", "meta"] {

@@ -58,6 +58,11 @@ fn already_running(run_dir: &Path, name: &str) -> bool {
 /// Returns the apps it started, as `user/name`.
 pub fn recover_all() -> Vec<String> {
     log(&format!("boot-recover: scanning {STATE_BASE}"));
+    // O programa BPF não sobrevive a um reboot; volta antes do primeiro app.
+    // Com `refresh`, também troca o de uma versão anterior do binário.
+    if let Err(e) = crate::limits::bindguard::ensure(true) {
+        log(&format!("bindguard: {e:#}"));
+    }
     let mut started = Vec::new();
 
     for (user_dir, username) in crate::sys::state::list_accounts() {
