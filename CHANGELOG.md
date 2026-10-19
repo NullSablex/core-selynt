@@ -269,6 +269,25 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 ### Fixed
 
+**Netguard derrubava aplicação que só usa UDP como cliente**
+- Pelo `/proc` não se distingue um serviço UDP (o app escolheu o endereço com
+  `bind()`) de um cliente (o kernel deu porta efêmera no primeiro envio): os
+  dois aparecem como `0.0.0.0:porta` sem conexão. A regra "todo UDP conta"
+  derrubava clientes — um app que consulta outros servidores por UDP caía a
+  cada varredura que coincidisse com o socket aberto
+- A recusa passa para o kernel: um programa BPF de cgroup (`bind4`/`bind6`)
+  preso ao `selynt.slice` recusa com `EPERM` todo `bind()` de aplicação em
+  endereço não-loopback com porta fixa. Loopback e porta 0 (o kernel escolhe,
+  como fazem o resolvedor da musl e o `dgram` do Node) passam; socket Unix não
+  passa pelo gancho. Vale também para TCP, e fecha a janela de até 15s em que
+  um serviço ficava exposto antes da varredura
+- O programa é preso antes de cada processo de aplicação nascer (o slice é
+  implícito e pode sumir quando fica vazio), de novo no `boot-recover` e no
+  `setup`, e solto no `teardown`. Modo exclusivo: prender de novo substitui
+- Com o gancho ativo, o netguard deixa de contar UDP e fica com o caso que o
+  gancho não vê, `listen()` TCP sem `bind()`. Sem ele, volta à regra antiga e
+  o diagnóstico acusa `bindguard_missing`
+
 **Caminho do socket podia passar do limite do kernel, em silêncio**
 - O socket ficava em `.sockets/<app>/<domínio>`: com nome de até 64 e domínio
   de até 253 caracteres, o caminho passava dos 107 bytes que cabem num

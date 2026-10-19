@@ -56,7 +56,7 @@ fn app_has_external_port(username: &str, name: &str, pid: u32) -> bool {
         p if p.is_empty() => vec![pid],
         p => p,
     };
-    has_external_listen(&pids)
+    has_external_listen(&pids, !crate::limits::bindguard::active())
 }
 
 /// O caminho do socket do app, recusando o start se não couber num

@@ -354,6 +354,12 @@ fn spawn_for(
     let Ok(meta) = crate::load_app_meta(state_dir, name) else {
         return None;
     };
+    // O gancho de bind tem de estar preso antes de o processo nascer: o scope
+    // herda a regra do slice no momento em que é criado. Se falhar, o app sobe
+    // assim mesmo e o netguard volta a contar UDP — o diagnóstico acusa.
+    if let Err(e) = limits::bindguard::ensure(false) {
+        sys::output::debug(format!("bindguard: {e:#}"));
+    }
     // Resolve the siblings before this app appears, so they shrink first.
     limits::usage::reapply_app_limits_including(state_dir, username, name);
     if let Err(e) = crate::init_app_logs_dir(&PathBuf::from(&meta.cwd), uid, gid) {
