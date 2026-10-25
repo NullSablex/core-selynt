@@ -165,60 +165,348 @@ fn build_inner(
     inner
 }
 
-/// Interrompe o comando em execução.
+/// Nome do serviço do systemd em que o job de uma aplicação roda.
+pub fn job_unit(username: &str, app: &str) -> String {
+    format!("selynt-{username}-{app}-job.service")
+}
+
+/// O caminho do cgroup do job, como aparece em `/proc/<pid>/cgroup`.
+fn job_cgroup(username: &str, app: &str) -> String {
+    format!(
+        "/{}/{}/{}",
+        crate::limits::bindguard::SLICE_UNIT,
+        crate::limits::policy::slice_unit_name(username),
+        job_unit(username, app)
+    )
+}
+
+/// PIDs do cgroup do job, ou vazio quando ele não está rodando.
+pub fn job_pids(username: &str, app: &str) -> Vec<u32> {
+    std::fs::read_to_string(format!(
+        "/sys/fs/cgroup{}/cgroup.procs",
+        job_cgroup(username, app)
+    ))
+    .unwrap_or_default()
+    .lines()
+    .filter_map(|l| l.trim().parse().ok())
+    .collect()
+}
+
+/// Grava o estado do job. Escrita atômica: a página consulta a qualquer
+/// momento e não pode ler um arquivo pela metade.
 ///
-/// Envia `SIGINT` — o mesmo que o Ctrl+C de um terminal —, que é o sinal que o
-/// npm e as ferramentas de build sabem tratar: elas limpam o que estavam
-/// escrevendo antes de sair. Só depois, se o processo insistir, vem o
-/// `SIGKILL`, que não dá essa chance e pode deixar `node_modules` pela metade.
-///
-/// O sinal vai para o **grupo** de processos, não só para o líder: o npm
-/// delega a outros processos, e matar apenas o pai deixaria os filhos rodando.
-pub fn cmd_stop_job(state_dir: &Path, app: &str, gid: u32, dbg: Option<&Value>) -> ! {
-    if load_app_meta(state_dir, app).is_err() {
-        user_error("app_not_found", &format!("app '{app}' not found"));
+/// O arquivo fica com a conta: é ela, dentro do serviço do job, que grava o
+/// andamento e o desfecho. Quando o lado root grava (início, interrupção), o
+/// `atomic_write` não segue symlink e o dono volta para a conta.
+fn write_state(paths: &Paths, uid: u32, gid: u32, state: &Value) {
+    let body = state.to_string();
+    if crate::sys::fs::atomic_write(&paths.state, body.as_bytes()).is_ok() {
+        let _ = crate::sys::fs::set_perm(&paths.state, 0o640);
+        let _ = crate::sys::fs::chown_path(&paths.state, uid, gid);
     }
+}
+
+fn read_state(paths: &Paths) -> Option<Value> {
+    if !crate::sys::fs::is_regular_file(&paths.state) {
+        return None;
+    }
+    serde_json::from_str(&std::fs::read_to_string(&paths.state).ok()?).ok()
+}
+
+/// O que foi pedido, já validado.
+struct Request {
+    meta: AppMeta,
+    kind: Kind,
+    policy: crate::sys::state::NpmPolicy,
+    script: String,
+    args: Vec<String>,
+    rotulo: String,
+}
+
+/// Valida um pedido de job. Roda nos dois lados: no root antes de lançar, e
+/// de novo dentro do serviço, que não confia no que recebeu pela linha de
+/// comando.
+fn validate(
+    state_dir: &Path,
+    app: &str,
+    kind_raw: &str,
+    script: &str,
+    args_raw: &str,
+) -> Result<Request, (String, String)> {
+    let err = |c: &str, m: String| (c.to_string(), m);
+    let meta = load_app_meta(state_dir, app)
+        .map_err(|_| err("app_not_found", format!("app '{app}' not found")))?;
+    if meta.app_type != "node" {
+        return Err(err("not_node", "only Node.js apps run npm commands".into()));
+    }
+    let kind = Kind::parse(kind_raw)
+        .ok_or_else(|| err("invalid_command", format!("unknown command '{kind_raw}'")))?;
+    let policy = npm_policy();
+    if !policy.allows(kind.npm_arg()) {
+        return Err(err(
+            "command_disabled",
+            format!("the server administrator disabled 'npm {}'", kind.npm_arg()),
+        ));
+    }
+    // Nome de script vem do `package.json` do cliente, mas chega até aqui pela
+    // rede: é aqui que ele deixa de ser dado e vira parte de uma linha de
+    // comando.
+    if matches!(kind, Kind::Run) && !super::commands::is_safe_script_name(script) {
+        return Err(err(
+            "invalid_script",
+            "script name is not acceptable".into(),
+        ));
+    }
+    let args =
+        super::commands::split_arguments(args_raw).map_err(|e| err("invalid_arguments", e))?;
+    // Reescrever `node_modules` sob a aplicação em execução a quebra sem dar
+    // erro claro; melhor recusar e dizer o que fazer.
+    if kind.rewrites_tree() && super::get_status(state_dir, app).0 == "RUNNING" {
+        return Err(err(
+            "app_running",
+            "stop the application before changing its dependencies".into(),
+        ));
+    }
+    let rotulo = if matches!(kind, Kind::Run) {
+        format!("npm run {script}")
+    } else {
+        format!("npm {}", kind.npm_arg())
+    };
+    Ok(Request {
+        meta,
+        kind,
+        policy,
+        script: script.to_string(),
+        args,
+        rotulo,
+    })
+}
+
+fn unit_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Lança um comando npm da aplicação, num serviço próprio do systemd.
+///
+/// Roda no lado root, antes da queda de privilégio. O job não é mais filho do
+/// processo que atendeu a requisição: nasce como `selynt-<conta>-<app>-job`,
+/// dentro do slice da conta, rodando como a conta. Por estar sob o
+/// `selynt.slice` herda o gancho de `bind()` (`limits::bindguard`), tem o
+/// teto de memória do app e é varrido pelo netguard. E quando o processo
+/// principal termina — por fim normal, tempo esgotado ou interrupção — o
+/// systemd encerra o cgroup inteiro: nada do que o comando criou continua
+/// rodando depois dele.
+#[allow(clippy::too_many_arguments)]
+pub fn launch(
+    state_dir: &Path,
+    username: &str,
+    app: &str,
+    kind_raw: &str,
+    script: &str,
+    args_raw: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<Value, (String, String)> {
+    let req = validate(state_dir, app, kind_raw, script, args_raw)?;
+    let unit = job_unit(username, app);
     let paths = Paths::new(state_dir, app);
 
-    let Ok(raw) = std::fs::read_to_string(&paths.state) else {
-        user_error("no_job", "no command is running");
-    };
-    let Ok(estado) = serde_json::from_str::<Value>(&raw) else {
-        user_error("no_job", "no command is running");
-    };
-    if estado.get("status").and_then(Value::as_str) != Some("running") {
-        user_error("no_job", "no command is running");
-    }
-    let Some(pid) = estado.get("pid").and_then(Value::as_u64) else {
-        user_error("no_job", "the running command has no process to stop");
-    };
-
-    let alvo = nix::unistd::Pid::from_raw(-(i32::try_from(pid).unwrap_or(0)));
-    let _ = nix::sys::signal::kill(alvo, nix::sys::signal::Signal::SIGINT);
-
-    // Dá tempo de encerrar por conta própria antes de insistir.
-    for _ in 0..25 {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if !crate::sys::proc::is_process_alive(u32::try_from(pid).unwrap_or(0)) {
-            break;
-        }
-    }
-    if crate::sys::proc::is_process_alive(u32::try_from(pid).unwrap_or(0)) {
-        let _ = nix::sys::signal::kill(alvo, nix::sys::signal::Signal::SIGKILL);
+    // Um job por aplicação: dois `npm install` na mesma árvore corrompem
+    // `node_modules` de um jeito que só aparece depois, no start.
+    if unit_active(&unit) {
+        return Err((
+            "job_running".into(),
+            "another command is already running".into(),
+        ));
     }
 
+    // O slice e o gancho de bind têm de existir antes de o serviço nascer.
+    crate::limits::bindguard::ensure(false)
+        .map_err(|e| ("bindguard_failed".into(), format!("{e:#}")))?;
+
+    let inicio = now_secs();
     write_state(
         &paths,
+        uid,
+        gid,
+        &json!({ "status": "running", "command": req.rotulo, "started_at": inicio }),
+    );
+
+    let exe = std::env::current_exe().map_err(|e| ("launch_failed".into(), format!("{e:#}")))?;
+    let mut run = Command::new("systemd-run");
+    run.arg("--quiet")
+        .arg("--collect")
+        .arg(format!("--unit={unit}"))
+        .arg(format!(
+            "--slice={}",
+            crate::limits::policy::slice_unit_name(username)
+        ))
+        .arg(format!("--uid={uid}"))
+        .arg(format!("--gid={gid}"))
+        .arg(format!("--setenv=USERNAME={username}"))
+        // O cgroup inteiro sai junto com o processo principal.
+        .arg("--property=KillMode=control-group")
+        // Ctrl+C primeiro: o npm limpa o que estava escrevendo antes de sair.
+        .arg("--property=KillSignal=SIGINT")
+        .arg("--property=TimeoutStopSec=5")
+        // Teto de garantia, acima do limite que o próprio job aplica.
+        .arg(format!("--property=RuntimeMaxSec={}", TIMEOUT_SECS + 60));
+    if let Some(l) = crate::limits::usage::app_limits_for(state_dir, username, app, &req.meta) {
+        run.arg(format!("--property=MemoryHigh={}", l.high));
+        run.arg(format!("--property=MemoryMax={}", l.max));
+    }
+    run.arg("--")
+        .arg(exe)
+        .arg("job-exec")
+        .arg(app)
+        .arg(kind_raw)
+        .arg("--script")
+        .arg(script)
+        .arg("--args")
+        .arg(args_raw)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let out = run
+        .output()
+        .map_err(|e| ("launch_failed".into(), format!("systemd-run: {e:#}")))?;
+    if !out.status.success() {
+        write_state(
+            &paths,
+            uid,
+            gid,
+            &json!({
+                "status": "failed", "command": req.rotulo,
+                "started_at": inicio, "finished_at": now_secs(), "exit_code": -1,
+            }),
+        );
+        return Err((
+            "launch_failed".into(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(json!({ "status": "running", "command": req.rotulo }))
+}
+
+/// Executa o job, dentro do serviço que `launch` criou.
+///
+/// Roda como a conta. Recusa se não estiver no cgroup do próprio job: fora
+/// dele não há limite, gancho de bind nem garantia de que tudo o que o
+/// comando criar termina junto — e chamar este subcomando direto não pode ser
+/// um caminho para contornar o preset ou esses limites.
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_job_exec(
+    state_dir: &Path,
+    username: &str,
+    app: &str,
+    kind_raw: &str,
+    script: &str,
+    args_raw: &str,
+    uid: u32,
+    gid: u32,
+    dbg: Option<&Value>,
+) -> ! {
+    let esperado = format!("0::{}", job_cgroup(username, app));
+    let atual = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    if !atual.lines().any(|l| l.trim_end() == esperado) {
+        user_error(
+            "not_in_job_unit",
+            "job-exec only runs inside the job unit the panel creates",
+        );
+    }
+
+    let req = match validate(state_dir, app, kind_raw, script, args_raw) {
+        Ok(r) => r,
+        Err((c, m)) => user_error(&c, &m),
+    };
+    let paths = Paths::new(state_dir, app);
+    let inicio = read_state(&paths)
+        .and_then(|v| v.get("started_at").and_then(Value::as_u64))
+        .unwrap_or_else(now_secs);
+    write_state(
+        &paths,
+        uid,
         gid,
         &json!({
-            "status": "stopped",
-            "command": estado.get("command").and_then(Value::as_str).unwrap_or(""),
-            "started_at": estado.get("started_at").and_then(Value::as_u64).unwrap_or(0),
-            "finished_at": now_secs(),
+            "status": "running", "command": req.rotulo,
+            "started_at": inicio, "pid": std::process::id(),
         }),
     );
 
-    success(with_debug(json!({ "stopped": true }), dbg));
+    let cmd = build_command(
+        &req.meta,
+        req.kind,
+        &req.script,
+        &req.args,
+        req.policy.ignore_scripts,
+    );
+    let (code, timed_out) = run_to_completion(cmd, &paths.log);
+    record_outcome(
+        &paths,
+        (uid, gid),
+        &req.rotulo,
+        inicio,
+        code,
+        timed_out,
+        &skipped_if(&req.meta, req.kind, &req.policy, code),
+    );
+    // Ao sair, o systemd encerra o que restar no cgroup do job.
+    success(with_debug(json!({ "finished": true }), dbg));
+}
+
+/// Interrompe o job em execução, encerrando o serviço inteiro.
+///
+/// `systemctl stop` manda `SIGINT` a todo o cgroup — o Ctrl+C que o npm e as
+/// ferramentas de build sabem tratar — e, se algo insistir por 5s, `SIGKILL`.
+/// Alcança tudo o que o comando criou, inclusive o que tenha saído do grupo de
+/// processos.
+pub fn stop(
+    state_dir: &Path,
+    username: &str,
+    app: &str,
+    uid: u32,
+    gid: u32,
+    reason: Option<&str>,
+) -> Result<Value, (String, String)> {
+    if load_app_meta(state_dir, app).is_err() {
+        return Err(("app_not_found".into(), format!("app '{app}' not found")));
+    }
+    let paths = Paths::new(state_dir, app);
+    let estado = read_state(&paths);
+    let unit = job_unit(username, app);
+    let rodando = estado
+        .as_ref()
+        .is_some_and(|v| v.get("status").and_then(Value::as_str) == Some("running"));
+    if !rodando && !unit_active(&unit) {
+        return Err(("no_job".into(), "no command is running".into()));
+    }
+
+    let _ = Command::new("systemctl")
+        .args(["stop", &unit])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let campo = |k: &str| {
+        estado
+            .as_ref()
+            .and_then(|v| v.get(k).cloned())
+            .unwrap_or(Value::Null)
+    };
+    let mut novo = json!({
+        "status": "stopped",
+        "command": campo("command"),
+        "started_at": campo("started_at"),
+        "finished_at": now_secs(),
+    });
+    if let (Some(r), Some(o)) = (reason, novo.as_object_mut()) {
+        o.insert("reason".into(), json!(r));
+    }
+    write_state(&paths, uid, gid, &novo);
+    Ok(json!({ "stopped": true }))
 }
 
 /// Só o comando npm, sem o confinamento.
@@ -233,21 +521,9 @@ fn build_npm_command(meta: &AppMeta, kind: Kind, script: &str, args: &[String]) 
     build_inner(meta, kind, script, args, true)
 }
 
-/// Grava o estado do job. Escrita atômica: a página consulta a qualquer
-/// momento e não pode ler um arquivo pela metade.
-fn write_state(paths: &Paths, gid: u32, state: &Value) {
-    let body = state.to_string();
-    if crate::sys::fs::atomic_write(&paths.state, body.as_bytes()).is_ok() {
-        // A conta precisa ler o próprio job; escrever, não — o arquivo fica em
-        // `.run`, que tem sticky bit e dono root.
-        let _ = crate::sys::fs::set_perm(&paths.state, 0o640);
-        let _ = crate::sys::fs::chown_path(&paths.state, 0, gid);
-    }
-}
-
 /// Executa o comando e devolve `(código de saída, encerrado por tempo)`.
 ///
-/// Chamado no processo filho, depois do fork: aqui a espera não prende ninguém.
+/// Chamado dentro do serviço do job: aqui a espera não prende ninguém.
 fn run_to_completion(mut cmd: Command, log: &Path) -> (i32, bool) {
     let Ok(file) = std::fs::File::create(log) else {
         return (-1, false);
@@ -278,147 +554,6 @@ fn run_to_completion(mut cmd: Command, log: &Path) -> (i32, bool) {
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-}
-
-/// Executa um comando npm da aplicação.
-///
-/// Roda do lado da conta, depois da queda de privilégio: o que instala
-/// dependências e o que as executa precisam ser o mesmo usuário, senão os
-/// arquivos saem com dono errado e a aplicação não os lê.
-pub fn cmd_run_job(
-    state_dir: &Path,
-    app: &str,
-    kind_raw: &str,
-    script: &str,
-    args_raw: &str,
-    gid: u32,
-    dbg: Option<&Value>,
-) -> ! {
-    let Ok(meta) = load_app_meta(state_dir, app) else {
-        user_error("app_not_found", &format!("app '{app}' not found"));
-    };
-    if meta.app_type != "node" {
-        user_error("not_node", "only Node.js apps run npm commands");
-    }
-
-    let Some(kind) = Kind::parse(kind_raw) else {
-        user_error("invalid_command", &format!("unknown command '{kind_raw}'"));
-    };
-    let policy = npm_policy();
-    if !policy.allows(kind.npm_arg()) {
-        user_error(
-            "command_disabled",
-            &format!("the server administrator disabled 'npm {}'", kind.npm_arg()),
-        );
-    }
-
-    // Nome de script vem do `package.json` do cliente, mas chega até aqui pela
-    // rede: é aqui que ele deixa de ser dado e vira parte de uma linha de
-    // comando.
-    if matches!(kind, Kind::Run) && !super::commands::is_safe_script_name(script) {
-        user_error("invalid_script", "script name is not acceptable");
-    }
-    let args = match super::commands::split_arguments(args_raw) {
-        Ok(a) => a,
-        Err(e) => user_error("invalid_arguments", &e),
-    };
-
-    // Reescrever `node_modules` sob a aplicação em execução a quebra sem dar
-    // erro claro; melhor recusar e dizer o que fazer.
-    if kind.rewrites_tree() {
-        let (status, _, _) = super::get_status(state_dir, app);
-        if status == "RUNNING" {
-            user_error(
-                "app_running",
-                "stop the application before changing its dependencies",
-            );
-        }
-    }
-
-    let paths = Paths::new(state_dir, app);
-
-    // Um job por aplicação: dois `npm install` na mesma árvore corrompem
-    // `node_modules` de um jeito que só aparece depois, no start.
-    if let Ok(raw) = std::fs::read_to_string(&paths.state)
-        && let Ok(atual) = serde_json::from_str::<Value>(&raw)
-        && atual.get("status").and_then(Value::as_str) == Some("running")
-    {
-        user_error("job_running", "another command is already running");
-    }
-
-    let rotulo = if matches!(kind, Kind::Run) {
-        format!("npm run {script}")
-    } else {
-        format!("npm {}", kind.npm_arg())
-    };
-    let inicio = now_secs();
-
-    write_state(
-        &paths,
-        gid,
-        &json!({
-            "status": "running",
-            "command": rotulo,
-            "started_at": inicio,
-        }),
-    );
-
-    let cmd = build_command(&meta, kind, script, &args, policy.ignore_scripts);
-
-    // O comando roda desprendido da requisição. Um `npm install` grande passa
-    // do timeout do CGI com folga, e prender a resposta a ele significaria a
-    // página perder a execução no meio — exatamente o que o painel do
-    // concorrente faz e que este desenho existe para evitar. Quem quer saber
-    // como terminou consulta `job-status`.
-    // `fork` é unsafe porque o filho herda o estado da memória e só pode chamar
-    // funções async-signal-safe até o exec. Aqui é seguro: nada de threads (o
-    // binário é single-threaded), e o filho vai direto para `setsid` e `spawn`,
-    // sem alocar nem tocar em estado compartilhado.
-    match unsafe { nix::unistd::fork() } {
-        Ok(nix::unistd::ForkResult::Parent { .. }) => {
-            success(with_debug(
-                json!({ "status": "running", "command": rotulo }),
-                dbg,
-            ));
-        }
-        Ok(nix::unistd::ForkResult::Child) => {}
-        Err(e) => {
-            user_error("fork_failed", &format!("could not start the command: {e}"));
-        }
-    }
-
-    // Daqui para baixo é o filho. Nova sessão, para não morrer junto com o
-    // processo que atendeu a requisição — e para ser o líder do grupo, de modo
-    // que a interrupção alcance o npm e tudo o que ele criou.
-    let _ = nix::unistd::setsid();
-
-    // O PID vai para o estado: é por ele que `stop-job` encontra o que
-    // interromper. Gravado antes de começar, senão um comando que trava logo no
-    // início ficaria sem como ser parado.
-    write_state(
-        &paths,
-        gid,
-        &json!({
-            "status": "running",
-            "command": rotulo,
-            "started_at": inicio,
-            "pid": std::process::id(),
-        }),
-    );
-
-    let (code, timed_out) = run_to_completion(cmd, &paths.log);
-    record_outcome(
-        &paths,
-        gid,
-        &rotulo,
-        inicio,
-        code,
-        timed_out,
-        &skipped_if(&meta, kind, &policy, code),
-    );
-
-    // O filho não responde ao painel: quem perguntou já recebeu "running".
-    std::process::exit(0);
 }
 
 /// Pacotes nativos que ficaram sem compilar, e por quê.
@@ -457,7 +592,7 @@ fn skipped_if(
 /// Grava o desfecho do job.
 fn record_outcome(
     paths: &Paths,
-    gid: u32,
+    (uid, gid): (u32, u32),
     rotulo: &str,
     inicio: u64,
     code: i32,
@@ -473,6 +608,7 @@ fn record_outcome(
     };
     write_state(
         paths,
+        uid,
         gid,
         &json!({
             "status": status,
@@ -639,6 +775,30 @@ pub fn cmd_job_status(state_dir: &Path, app: &str, dbg: Option<&Value>) -> ! {
     let Ok(mut estado) = serde_json::from_str::<Value>(&raw) else {
         success(with_debug(json!({ "job": Value::Null }), dbg));
     };
+
+    // "running" sem processo vivo: o job morreu sem gravar o desfecho (memória
+    // esgotada, teto de tempo do serviço). Dizer isso, em vez de mostrar para
+    // sempre algo que já não roda.
+    let em_curso = estado.get("status").and_then(Value::as_str) == Some("running");
+    let pid = estado
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|p| u32::try_from(p).ok());
+    let iniciado = estado
+        .get("started_at")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    // Sem pid, o serviço nunca chegou a executar; dá um minuto de folga.
+    let morto = pid.map_or_else(
+        || now_secs().saturating_sub(iniciado) > 60,
+        |p| !crate::sys::proc::is_process_alive(p),
+    );
+    if em_curso
+        && morto
+        && let Some(o) = estado.as_object_mut()
+    {
+        o.insert("status".into(), json!("interrupted"));
+    }
 
     // O log é a saída do npm, que já vem sem cor: as sequências de escape
     // atrapalhariam a leitura na tela tanto quanto no log da aplicação.
