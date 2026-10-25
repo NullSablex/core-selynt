@@ -41,6 +41,9 @@ pub enum Kind {
     Update,
     Ci,
     Run,
+    /// Recompila os módulos nativos para o Node em uso. Não é escolha do
+    /// cliente no preset: é consequência da troca de versão.
+    Rebuild,
 }
 
 impl Kind {
@@ -50,6 +53,7 @@ impl Kind {
             "update" => Some(Self::Update),
             "ci" => Some(Self::Ci),
             "run" => Some(Self::Run),
+            "rebuild" => Some(Self::Rebuild),
             _ => None,
         }
     }
@@ -60,6 +64,7 @@ impl Kind {
             Self::Update => "update",
             Self::Ci => "ci",
             Self::Run => "run",
+            Self::Rebuild => "rebuild",
         }
     }
 
@@ -70,7 +75,10 @@ impl Kind {
     /// claro — módulo que some no meio de um `require`, versão que muda entre
     /// dois imports.
     const fn rewrites_tree(self) -> bool {
-        matches!(self, Self::Install | Self::Update | Self::Ci)
+        matches!(
+            self,
+            Self::Install | Self::Update | Self::Ci | Self::Rebuild
+        )
     }
 }
 
@@ -242,10 +250,26 @@ fn validate(
     let kind = Kind::parse(kind_raw)
         .ok_or_else(|| err("invalid_command", format!("unknown command '{kind_raw}'")))?;
     let policy = npm_policy();
-    if !policy.allows(kind.npm_arg()) {
+    // O rebuild só existe para acompanhar a troca de versão e mexe na mesma
+    // árvore que o install: vale o que o admin decidiu para o install. E sem
+    // os scripts de instalação ele não recompila nada — recusar diz o motivo
+    // em vez de rodar à toa e terminar "com sucesso".
+    let liberado = if matches!(kind, Kind::Rebuild) {
+        "install"
+    } else {
+        kind.npm_arg()
+    };
+    if !policy.allows(liberado) {
         return Err(err(
             "command_disabled",
             format!("the server administrator disabled 'npm {}'", kind.npm_arg()),
+        ));
+    }
+    if matches!(kind, Kind::Rebuild) && policy.ignore_scripts {
+        return Err(err(
+            "rebuild_needs_scripts",
+            "native modules cannot be rebuilt while install scripts are disabled on this server"
+                .into(),
         ));
     }
     // Nome de script vem do `package.json` do cliente, mas chega até aqui pela
@@ -628,11 +652,25 @@ fn record_outcome(
 /// patológica não prender o job depois de o npm já ter terminado.
 const MAX_PACKAGES_SCANNED: usize = 20_000;
 
+/// Pacotes instalados que compilam código nativo — compilados ou não.
+///
+/// É o que precisa ser recompilado quando a versão do Node muda: o addon
+/// compilado para uma versão não carrega em outra.
+pub fn native_packages(app_dir: &Path) -> Vec<String> {
+    scan_native(app_dir, false)
+}
+
 /// Pacotes instalados que precisavam compilar código nativo e não compilaram.
+fn skipped_native_builds(app_dir: &Path) -> Vec<String> {
+    scan_native(app_dir, true)
+}
+
+/// Pacotes nativos instalados; com `only_unbuilt`, só os que ficaram sem
+/// addon compilado.
 ///
 /// Roda como a conta, sobre a árvore dela, e não segue symlink: um link em
 /// `node_modules` apontando para fora não leva a verificação junto.
-fn skipped_native_builds(app_dir: &Path) -> Vec<String> {
+fn scan_native(app_dir: &Path, only_unbuilt: bool) -> Vec<String> {
     let mut achados = std::collections::BTreeSet::new();
     let mut pendentes = vec![app_dir.join("node_modules")];
     let mut visitados = 0usize;
@@ -643,7 +681,7 @@ fn skipped_native_builds(app_dir: &Path) -> Vec<String> {
             if visitados > MAX_PACKAGES_SCANNED {
                 return achados.into_iter().collect();
             }
-            if needs_native_build(&pacote) && !has_compiled_addon(&pacote) {
+            if needs_native_build(&pacote) && !(only_unbuilt && has_compiled_addon(&pacote)) {
                 achados.insert(nome);
             }
             let aninhado = pacote.join("node_modules");
@@ -990,9 +1028,18 @@ mod tests {
         );
 
         let achados = skipped_native_builds(&raiz);
+        let nativos = super::native_packages(&raiz);
         let _ = std::fs::remove_dir_all(&raiz);
 
         assert_eq!(achados, ["@scope/nativo", "bcrypt", "interno", "sharp"]);
+
+        // Para a troca de versão contam também os que já compilaram: o addon
+        // feito para um Node não carrega em outro.
+        assert!(nativos.contains(&"compilado".to_string()));
+        assert!(
+            !nativos.contains(&"bufferutil".to_string()),
+            "prebuilds já servem"
+        );
     }
 
     #[test]
@@ -1008,6 +1055,7 @@ mod tests {
         assert!(Kind::Install.rewrites_tree());
         assert!(Kind::Update.rewrites_tree());
         assert!(Kind::Ci.rewrites_tree());
+        assert!(Kind::Rebuild.rewrites_tree());
         assert!(!Kind::Run.rewrites_tree());
     }
 }
