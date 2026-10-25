@@ -631,6 +631,9 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
             "scripts": names,
             "deps": deps,
             "policy": crate::sys::state::npm_policy().to_json(),
+            // Os módulos nativos são o que precisa ser recompilado quando a
+            // versão do Node muda; a tela avisa antes de aplicar a troca.
+            "native_packages": super::job::native_packages(Path::new(&meta.cwd)),
         }),
         dbg,
     ));

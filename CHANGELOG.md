@@ -128,6 +128,16 @@ correção.
 
 ### Added
 
+**Recompilação de módulos nativos na troca de versão do Node**
+- Novo tipo de job, `rebuild` (`npm rebuild`), para recompilar os módulos
+  nativos para o Node em uso. Não é um comando do preset: é consequência da
+  troca de versão, e vale o que o admin decidiu para o `install`. Exige o app
+  parado, como os outros que mexem em `node_modules`
+- Com `--ignore-scripts` ligado o rebuild não recompila nada: é recusado com
+  `rebuild_needs_scripts` em vez de terminar "com sucesso" sem efeito
+- `scripts` passa a informar `native_packages`, os pacotes que compilam
+  código nativo — compilados ou não —, para a tela avisar antes da troca
+
 **Preset global da execução npm**
 - O admin do servidor escolhe quais comandos npm o painel oferece (`install`,
   `update`, `ci`, `run`) e se `install`/`update`/`ci` rodam com
