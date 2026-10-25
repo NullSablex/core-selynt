@@ -143,6 +143,18 @@ enum Commands {
     /// Reports the state of the app's last npm command.
     JobStatus { name: String },
 
+    /// Runs a job inside the systemd unit `run-job` created. Internal: refuses
+    /// to run anywhere else.
+    #[command(hide = true)]
+    JobExec {
+        name: String,
+        command: String,
+        #[arg(long, default_value = "")]
+        script: String,
+        #[arg(long, default_value = "")]
+        args: String,
+    },
+
     /// Interrupts the running npm command, as Ctrl+C would.
     StopJob { name: String },
 

@@ -36,6 +36,28 @@ pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
         let Ok(meta) = load_app_meta(state_dir, &name) else {
             continue;
         };
+
+        // O job npm do app tem cgroup próprio e responde à mesma regra: o que
+        // ele rodar não abre porta de fora. Para o serviço inteiro.
+        let job = crate::app::job::job_pids(username, &name);
+        if !job.is_empty()
+            && has_external_listen(&job, udp_counts)
+            && let Some((uid, gid)) = crate::sys::auth::lookup_user_ids(username)
+        {
+            debug(format!(
+                "netguard: job of '{name}' bound an externally reachable port — stopping"
+            ));
+            let _ = crate::app::job::stop(
+                state_dir,
+                username,
+                &name,
+                uid,
+                gid,
+                Some("network_port_forbidden"),
+            );
+            stopped.push(format!("{name} (job)"));
+        }
+
         let pids = super::usage::scope_pids(username, &name);
         if pids.is_empty() {
             continue;

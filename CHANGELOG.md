@@ -9,6 +9,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ### Security
 
+**Job npm nascia fora do controle do painel**
+- O job era filho do processo que atendeu a requisição e ficava no cgroup do
+  DirectAdmin: fora do `selynt.slice` (sem o gancho de `bind()`), sem o limite
+  de memória do app, fora da varredura do netguard, e o que ele criasse fora
+  do grupo de processos sobrevivia ao "Interromper" e ao tempo limite
+- Passa a nascer como serviço próprio do systemd,
+  `selynt-<conta>-<app>-job.service`, no slice da conta e rodando como ela:
+  herda o gancho de `bind()`, tem o teto de memória do app e é varrido pelo
+  netguard. Quando o processo principal termina — por fim normal, tempo
+  esgotado ou interrupção — o systemd encerra o cgroup inteiro
+  (`KillMode=control-group`), com `SIGINT` primeiro e `SIGKILL` depois de 5s
+- O subcomando interno que executa o job recusa rodar fora do cgroup do
+  próprio serviço, e revalida o pedido e o preset em vez de confiar na linha
+  de comando
+- `job-status` informa `interrupted` quando o job morreu sem gravar o
+  desfecho; o netguard grava `reason: network_port_forbidden` ao parar um job
+
 **Gravações do lado root seguiam symlink em pastas da conta**
 - Parte do trabalho do binário roda como root antes da queda de privilégio e
   grava em pastas onde a conta também escreve (`.run/`, o diretório de estado,

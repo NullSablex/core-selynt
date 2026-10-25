@@ -79,7 +79,28 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // the home resolves with the account's rights, never root's.
         // Do lado da conta: o que instala as dependências e o que as executa
         // têm de ser o mesmo usuário, senão os arquivos saem com dono errado.
+        // Do lado root: o job nasce como serviço do systemd, no slice da conta,
+        // e só o root cria e para serviços. Quem executa é a conta, dentro dele.
         Commands::RunJob {
+            name,
+            command,
+            script,
+            args,
+        } => {
+            let out = app::job::launch(
+                &state_dir, &username, &name, &command, &script, &args, uid, gid,
+            );
+            let d = dbg;
+            Box::new(move || crate::emit_prelude_result(out, d.as_ref()))
+        }
+
+        Commands::StopJob { name } => {
+            let out = app::job::stop(&state_dir, &username, &name, uid, gid, None);
+            let d = dbg;
+            Box::new(move || crate::emit_prelude_result(out, d.as_ref()))
+        }
+
+        Commands::JobExec {
             name,
             command,
             script,
@@ -87,13 +108,18 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         } => {
             let (sd, d) = (state_dir, dbg);
             Box::new(move || {
-                app::job::cmd_run_job(&sd, &name, &command, &script, &args, gid, d.as_ref())
+                app::job::cmd_job_exec(
+                    &sd,
+                    &username,
+                    &name,
+                    &command,
+                    &script,
+                    &args,
+                    uid,
+                    gid,
+                    d.as_ref(),
+                )
             })
-        }
-
-        Commands::StopJob { name } => {
-            let (sd, d) = (state_dir, dbg);
-            Box::new(move || app::job::cmd_stop_job(&sd, &name, gid, d.as_ref()))
         }
 
         Commands::JobStatus { name } => {
