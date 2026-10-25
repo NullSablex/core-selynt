@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="img/logo.png" alt="Selynt Panel" width="120" />
+  <img src="img/logo.svg" alt="Selynt Panel" width="120" />
 </p>
 
 <h1 align="center">Core Selynt</h1>

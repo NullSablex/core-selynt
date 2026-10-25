@@ -4,7 +4,7 @@ hide:
 ---
 
 <p align="center">
-  <img src="assets/logo.png" alt="Selynt Panel" width="120" />
+  <img src="assets/logo.svg" alt="Selynt Panel" width="120" />
 </p>
 
 # Core Selynt
