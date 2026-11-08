@@ -232,7 +232,7 @@ pub fn sync() -> Option<usize> {
 fn reapply_account_limits() {
     for (state_dir, username) in crate::sys::state::list_accounts() {
         let limits = crate::limits::usage::read_da_limits(&username);
-        crate::limits::usage::ensure_slice_cap(&username, limits.memory_max);
+        crate::limits::usage::ensure_slice_cap(&username, limits);
         crate::limits::usage::reapply_app_limits(&state_dir, &username);
     }
 }

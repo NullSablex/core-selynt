@@ -9,6 +9,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 
 ### Security
 
+**Aplicações sem nenhum limite de CPU**
+- Só a memória era limitada: o controle de CPU nem estava ativo no
+  `selynt.slice`, e um app — o caso típico é um app invadido minerando —
+  podia ocupar o processador inteiro, inclusive o do servidor web e do painel.
+  A cota `CPUQuota` do `DirectAdmin` era lida, mas só aparecia nas estatísticas
+- O slice de cada conta passa a receber `CPUWeight`, o que liga o controle e,
+  sob disputa, divide a CPU com justiça entre as contas e entre o conjunto dos
+  apps e o resto do servidor; e `CPUQuota` como teto rígido quando a conta tem
+  cota no `DirectAdmin`. Aplicado no start e a cada sincronização, então vale
+  também para apps já no ar
+
 **Job npm nascia fora do controle do painel**
 - O job era filho do processo que atendeu a requisição e ficava no cgroup do
   DirectAdmin: fora do `selynt.slice` (sem o gancho de `bind()`), sem o limite

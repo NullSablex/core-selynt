@@ -135,7 +135,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // `user.conf` belongs to `diradmin` and cannot be read after the drop.
         Commands::Stats { name } => {
             let da = limits::usage::read_da_limits(&username);
-            limits::usage::ensure_slice_cap(&username, da.memory_max);
+            limits::usage::ensure_slice_cap(&username, da);
             let (sd, u, d) = (state_dir, username, dbg);
             Box::new(move || limits::usage::cmd_stats(&sd, &name, &u, da, d.as_ref()))
         }
@@ -155,7 +155,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // divided from, and `user.conf` is unreadable after the drop.
         Commands::Start { name } => {
             let da = limits::usage::read_da_limits(&username);
-            limits::usage::ensure_slice_cap(&username, da.memory_max);
+            limits::usage::ensure_slice_cap(&username, da);
             let spawned = spawn_for(&state_dir, &username, &name, uid, gid, da);
             let (sd, u, w, d) = (state_dir, username, web_user, dbg);
             Box::new(move || app::start::cmd_start(&sd, &name, &u, &w, spawned, d.as_ref()))
@@ -164,7 +164,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // its scope is still alive — hence excluded explicitly.
         Commands::Stop { name, timeout } => {
             let da = limits::usage::read_da_limits(&username);
-            limits::usage::ensure_slice_cap(&username, da.memory_max);
+            limits::usage::ensure_slice_cap(&username, da);
             limits::usage::reapply_app_limits_excluding(&state_dir, &username, &name);
             let (sd, d) = (state_dir, dbg);
             Box::new(move || app::commands::cmd_stop(&sd, &name, timeout, d.as_ref()))
@@ -177,7 +177,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // its own, escaping the account cap and invisible to the netguard sweep.
         Commands::Restart { name } => {
             let da = limits::usage::read_da_limits(&username);
-            limits::usage::ensure_slice_cap(&username, da.memory_max);
+            limits::usage::ensure_slice_cap(&username, da);
             if let Ok(meta) = crate::load_app_meta(&state_dir, &name) {
                 limits::netguard::stop_app_tree(&state_dir, &name, &meta);
             }
@@ -235,7 +235,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // app and clean up after it.
         Commands::Remove { name, delete_dir } => {
             let da = limits::usage::read_da_limits(&username);
-            limits::usage::ensure_slice_cap(&username, da.memory_max);
+            limits::usage::ensure_slice_cap(&username, da);
             limits::usage::reapply_app_limits_excluding(&state_dir, &username, &name);
             let meta = crate::load_app_meta(&state_dir, &name).ok();
             if meta.is_some() {
@@ -277,7 +277,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         Commands::SetMemoryMax { name, megabytes } => {
             let da = limits::usage::read_da_limits(&username);
             app::commands::apply_memory_max(&state_dir, &name, megabytes, gid);
-            limits::usage::ensure_slice_cap(&username, da.memory_max);
+            limits::usage::ensure_slice_cap(&username, da);
             limits::usage::reapply_app_limits(&state_dir, &username);
             let (sd, d) = (state_dir, dbg);
             Box::new(move || app::commands::cmd_set_memory_max(&sd, &name, megabytes, d.as_ref()))
@@ -394,7 +394,7 @@ fn spawn_for(
     let pid = app::start::spawn_into_scope(&meta, name, state_dir, username, uid, gid);
     // The first app of an account creates the slice; only now does it exist.
     if pid.is_some() {
-        limits::usage::ensure_slice_cap(username, da.memory_max);
+        limits::usage::ensure_slice_cap(username, da);
     }
     pid
 }
