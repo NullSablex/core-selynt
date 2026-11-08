@@ -92,7 +92,7 @@ pub fn read_scope_usage(username: &str, name: &str) -> Option<ScopeUsage> {
 }
 
 /// Account resource limits as configured in `DirectAdmin`.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DaLimits {
     pub memory_max: Option<u64>,
     pub cpu_quota_percent: Option<u32>,
@@ -382,20 +382,44 @@ fn reapply_app_limits_with(state_dir: &Path, username: &str, pending: &str, leav
 /// deliberately allowed to add up to more than this, and the slice is what
 /// stops them. Called before and after a spawn — before, the slice may not
 /// exist yet and the call simply fails; after, it exists and takes effect.
-pub fn ensure_slice_cap(username: &str, cap: Option<u64>) {
+pub fn ensure_slice_cap(username: &str, da: DaLimits) {
     if !super::policy::can_run_scopes() {
         return;
     }
     let unit = super::policy::slice_unit_name(username);
-    let value = cap.map_or_else(
-        || "MemoryMax=infinity".to_string(),
-        |bytes| format!("MemoryMax={bytes}"),
-    );
     let _ = std::process::Command::new("systemctl")
-        .args(["set-property", "--runtime", &unit, &value])
+        .arg("set-property")
+        .arg("--runtime")
+        .arg(&unit)
+        .args(slice_properties(da))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Peso de CPU de cada conta — o padrão do systemd, aplicado explicitamente.
+///
+/// O valor é o de sempre; o que importa é estar definido: é isso que liga o
+/// controle de CPU no `selynt.slice`. Sem ele não havia controle nenhum, e um
+/// app podia ocupar o processador inteiro do servidor — o uso típico de um app
+/// invadido é minerar. Com ele, sob disputa, cada conta fica com uma fatia
+/// justa, e o conjunto dos apps não tira a CPU do servidor web e do painel.
+const ACCOUNT_CPU_WEIGHT: u32 = 100;
+
+/// Propriedades do slice da conta: memória e CPU.
+///
+/// `CPUQuota` vem do `DirectAdmin` quando a conta tem cota; sem cota, o vazio
+/// remove um teto anterior em vez de deixá-lo esquecido no slice.
+fn slice_properties(da: DaLimits) -> Vec<String> {
+    vec![
+        da.memory_max.map_or_else(
+            || "MemoryMax=infinity".to_string(),
+            |b| format!("MemoryMax={b}"),
+        ),
+        format!("CPUWeight={ACCOUNT_CPU_WEIGHT}"),
+        da.cpu_quota_percent
+            .map_or_else(|| "CPUQuota=".to_string(), |p| format!("CPUQuota={p}%")),
+    ]
 }
 
 #[cfg(test)]
@@ -453,5 +477,27 @@ mod da_limit_tests {
             .map(str::trim)
             .find(|v| !v.is_empty());
         assert_eq!(found, None);
+    }
+}
+
+#[cfg(test)]
+mod slice_property_tests {
+    use super::{DaLimits, slice_properties};
+
+    /// Sem cota no `DirectAdmin`, o peso de CPU ainda vai: é ele que liga o
+    /// controle. E o teto anterior é limpo, não herdado.
+    #[test]
+    fn without_quota_the_weight_is_still_set() {
+        let p = slice_properties(DaLimits::default());
+        assert_eq!(p, ["MemoryMax=infinity", "CPUWeight=100", "CPUQuota="]);
+    }
+
+    #[test]
+    fn the_directadmin_quota_becomes_the_ceiling() {
+        let p = slice_properties(DaLimits {
+            memory_max: Some(536_870_912),
+            cpu_quota_percent: Some(50),
+        });
+        assert_eq!(p, ["MemoryMax=536870912", "CPUWeight=100", "CPUQuota=50%"]);
     }
 }
