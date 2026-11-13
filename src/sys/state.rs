@@ -253,7 +253,7 @@ pub fn npm_policy() -> NpmPolicy {
 /// scripts de instalação desligados. Na dúvida, o lado seguro: só um `0`
 /// explícito libera os scripts, e comando desconhecido é descartado.
 fn parse_npm_policy(conteudo: Option<&str>) -> NpmPolicy {
-    let kv = conteudo.map(parse_kv).unwrap_or_default();
+    let kv = conteudo.map_or_default(parse_kv);
 
     let commands = kv.get("commands").map_or_else(
         || NPM_COMMANDS.iter().map(ToString::to_string).collect(),

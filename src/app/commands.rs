@@ -613,13 +613,12 @@ pub fn cmd_scripts(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     let mut names: Vec<String> = parsed
         .get("scripts")
         .and_then(Value::as_object)
-        .map(|m| {
+        .map_or_default(|m| {
             m.keys()
                 .filter(|k| is_safe_script_name(k))
                 .cloned()
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     names.sort();
 
     let deps = dependency_state(Path::new(&meta.cwd), &parsed);

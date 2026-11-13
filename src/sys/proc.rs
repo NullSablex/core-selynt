@@ -191,7 +191,7 @@ pub fn descendants_of(pid: u32) -> Vec<u32> {
     let mut out = Vec::new();
     let mut queue = vec![pid];
     while let Some(p) = queue.pop() {
-        for &c in children.get(&p).map(Vec::as_slice).unwrap_or_default() {
+        for &c in children.get(&p).map_or_default(Vec::as_slice) {
             out.push(c);
             queue.push(c);
         }

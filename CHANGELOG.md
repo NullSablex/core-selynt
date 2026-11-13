@@ -320,6 +320,19 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 ### Fixed
 
+**App isolado ficava órfão e não subia mais**
+- Durante o start, o "andamento" do app era medido pelo pid acompanhado, que
+  com isolamento é o do bubblewrap — só espera o filho, e CPU e memória dele
+  não mudam. Todo app isolado que levasse mais de ~10s para criar o socket
+  era dado como travado, como aconteceu num boot com o servidor carregado
+- Ao desistir, o painel matava só esse pid; o bubblewrap não repassa sinal, e
+  o app ficava vivo, órfão, com o scope ocupado. O painel o via parado, cada
+  start seguinte apagava o socket do órfão e falhava ao criar o scope — o
+  site ficava fora do ar sem saída pelo painel
+- O andamento passa a ser medido no scope inteiro (CPU e memória do cgroup);
+  desistir encerra todos os processos do scope; e o start encerra processos
+  que tenham sobrado no scope de um app dado como parado antes de subi-lo
+
 **Netguard derrubava aplicação que só usa UDP como cliente**
 - Pelo `/proc` não se distingue um serviço UDP (o app escolheu o endereço com
   `bind()`) de um cliente (o kernel deu porta efêmera no primeiro envio): os
@@ -487,6 +500,11 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
   `reseller/` é script que o DA executa, e vai a 755
 
 ### Changed
+
+**Dependências sem uso e lint do Rust 1.100**
+- Saem `serde` e `thiserror`, que não eram usadas (o compilador confirma); e
+  `.map(..).unwrap_or_default()` vira `.map_or_default(..)`, que o clippy do
+  Rust 1.100 passou a exigir
 
 **Sonda de deploy em Rust (`cargo xtask sonda`)**
 - `tools/sonda.sh` dependia de `python3` embutido para ler JSON e citava um
