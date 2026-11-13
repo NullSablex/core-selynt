@@ -163,6 +163,7 @@ pub fn cmd_start(
 
     let (status, pid, _) = get_status(state_dir, name);
     if status == "RUNNING" {
+        crate::sys::state::clear_failure(state_dir, name);
         success(with_debug(json!({ "pid": pid }), dbg));
     }
     refuse_unsupported_typescript(&meta);
@@ -209,6 +210,8 @@ pub fn cmd_start(
 
     signal_sync();
 
+    // No ar: a falha anterior, se havia, já não diz nada sobre o app.
+    crate::sys::state::clear_failure(state_dir, name);
     success(with_debug(json!({ "pid": pid }), dbg))
 }
 

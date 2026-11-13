@@ -139,6 +139,18 @@ correção.
 
 ### Added
 
+**Última falha de cada app, para a tela alertar**
+- Quando um app não subia ou caía, o motivo ia para o log do boot-recover ou
+  do netguard, que ninguém lê, e a tela só mostrava "parado"
+- Toda falha de start — pela tela ou na recuperação após reinício — e toda
+  parada feita pelo netguard grava `.run/<app>.last_error` (código, mensagem,
+  origem e hora). O registro é feito em `user_error`/`system_error`, então
+  cobre todos os caminhos de falha do start, inclusive os futuros. Start bem
+  sucedido, stop pelo usuário e remoção apagam o registro
+- `list`, `status` e `admin list` passam a trazer `last_error` e
+  `unexpected_stop` (app marcado para rodar e parado: cobre também a queda do
+  próprio app, que não passa por erro do painel)
+
 **Recompilação de módulos nativos na troca de versão do Node**
 - Novo tipo de job, `rebuild` (`npm rebuild`), para recompilar os módulos
   nativos para o Node em uso. Não é um comando do preset: é consequência da
@@ -319,6 +331,13 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 ---
 
 ### Fixed
+
+**Processo zumbi contado como vivo**
+- `is_process_alive` só conferia se `/proc/<pid>` existia, e um processo que
+  já morreu mas não foi recolhido (zumbi) ainda tem essa pasta. Um app que
+  encerrava logo ao iniciar era dado como "travado" (`socket_stuck`), com o
+  motivo errado. Zumbi passa a contar como morto, e o motivo sai
+  `process_exited`
 
 **App isolado ficava órfão e não subia mais**
 - Durante o start, o "andamento" do app era medido pelo pid acompanhado, que

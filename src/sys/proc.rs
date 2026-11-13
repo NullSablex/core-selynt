@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::Path;
 
 const TCP_LISTEN_STATE: &str = "0A";
 const PROC_NET_INODE_FIELD: usize = 9;
@@ -56,7 +55,17 @@ pub fn read_proc_starttime(pid: u32) -> Option<u64> {
 }
 
 pub fn is_process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // Zumbi já morreu: só espera o pai recolher o código de saída. Tratá-lo
+    // como vivo fazia um app que encerrava logo ao iniciar ser dado como
+    // "travado" e reportado com o motivo errado. Sem `/proc/<pid>/stat`, não
+    // existe.
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|c| {
+            let depois = c.rfind(')')?;
+            c.get(depois + 2..)?.chars().next()
+        })
+        .is_some_and(|estado| estado != 'Z' && estado != 'X')
 }
 
 /// Sum of `utime + stime` from `/proc/{pid}/stat` — total CPU ticks consumed.
@@ -297,5 +306,30 @@ mod tests {
         assert!(!is_externally_bound(""));
         assert!(!is_externally_bound("garbage"));
         assert!(!is_externally_bound("ABC:1"));
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::is_process_alive;
+
+    #[test]
+    fn a_running_process_is_alive() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    /// Filho que já saiu e não foi recolhido é zumbi: conta como morto.
+    #[test]
+    fn a_zombie_is_not_alive() {
+        let filho = std::process::Command::new("true").spawn().unwrap();
+        let pid = filho.id();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!is_process_alive(pid), "zumbi contado como vivo");
+        drop(filho);
+    }
+
+    #[test]
+    fn a_missing_pid_is_not_alive() {
+        assert!(!is_process_alive(u32::MAX - 1));
     }
 }
