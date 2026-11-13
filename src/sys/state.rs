@@ -282,6 +282,62 @@ pub fn active_socket_path(state_dir: &Path, meta: &AppMeta) -> PathBuf {
         .map_or_else(|| socket_path_for(state_dir, meta), PathBuf::from)
 }
 
+/// Onde fica a última falha de um app: `.run/<app>.last_error`.
+fn failure_path(state_dir: &Path, name: &str) -> PathBuf {
+    state_dir.join(".run").join(format!("{name}.last_error"))
+}
+
+/// Grava por que o app caiu ou não subiu, para a tela poder dizer.
+///
+/// Antes disso a causa ia para o log do boot-recover ou do netguard, que
+/// ninguém lê, e a tela só mostrava "parado". `origin` diz quem viu a falha:
+/// `panel` (start pela tela), `boot` (recuperação após reinício) ou
+/// `netguard` (varredura de portas). Grava pelo caminho que não segue
+/// symlink; rodando como root, devolve o arquivo à conta dona do estado.
+pub fn record_failure(state_dir: &Path, name: &str, code: &str, message: &str, origin: &str) {
+    let path = failure_path(state_dir, name);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let body = serde_json::json!({
+        "code": code, "message": message, "origin": origin, "at": at,
+    })
+    .to_string();
+    if super::fs::atomic_write(&path, body.as_bytes()).is_ok() {
+        let _ = super::fs::set_perm(&path, 0o640);
+        if nix::unistd::geteuid().is_root()
+            && let Ok(m) = std::fs::metadata(state_dir)
+        {
+            let _ = chown_path(&path, m.uid(), m.gid());
+        }
+    }
+}
+
+/// Apaga o registro: o app subiu, ou alguém o parou de propósito.
+pub fn clear_failure(state_dir: &Path, name: &str) {
+    let _ = std::fs::remove_file(failure_path(state_dir, name));
+}
+
+/// A última falha registrada, ou `null`.
+pub fn read_failure(state_dir: &Path, name: &str) -> serde_json::Value {
+    let path = failure_path(state_dir, name);
+    if !super::fs::is_regular_file(&path) {
+        return serde_json::Value::Null;
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Se o app deveria estar no ar e não está: marcado para rodar (`.enabled`) e
+/// parado. Pega também a queda do próprio app, que não passa por erro do
+/// painel nenhum.
+pub fn stopped_unexpectedly(state_dir: &Path, name: &str, status: &str) -> bool {
+    status != "RUNNING"
+        && super::fs::is_regular_file(&state_dir.join(".run").join(format!("{name}.enabled")))
+}
+
 /// Maior caminho que cabe em `sockaddr_un.sun_path` (108 bytes com o NUL).
 ///
 /// É ABI do kernel, não escolha do painel: nenhum processo faz `bind()` ou
@@ -580,5 +636,41 @@ mod socket_path_tests {
         let longo = format!("/{}", "x".repeat(SUN_PATH_MAX));
         assert!(!socket_path_fits(Path::new(&longo)));
         assert!(socket_path_fits(Path::new(&longo[..SUN_PATH_MAX])));
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::{clear_failure, read_failure, record_failure, stopped_unexpectedly};
+
+    #[test]
+    fn a_failure_is_recorded_read_and_cleared() {
+        let d = std::env::temp_dir().join(format!("selynt-falha-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".run")).unwrap();
+
+        assert!(read_failure(&d, "api").is_null());
+        record_failure(&d, "api", "socket_stuck", "não subiu", "boot");
+        let f = read_failure(&d, "api");
+        assert_eq!(f["code"], "socket_stuck");
+        assert_eq!(f["origin"], "boot");
+        assert!(f["at"].as_u64().unwrap() > 0);
+
+        clear_failure(&d, "api");
+        assert!(read_failure(&d, "api").is_null());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Marcado para rodar e parado: caiu sem ninguém pedir.
+    #[test]
+    fn enabled_and_stopped_means_it_went_down_on_its_own() {
+        let d = std::env::temp_dir().join(format!("selynt-queda-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".run")).unwrap();
+        assert!(!stopped_unexpectedly(&d, "api", "STOPPED"));
+        std::fs::write(d.join(".run/api.enabled"), "").unwrap();
+        assert!(stopped_unexpectedly(&d, "api", "STOPPED"));
+        assert!(!stopped_unexpectedly(&d, "api", "RUNNING"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

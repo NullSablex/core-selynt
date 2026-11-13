@@ -1,5 +1,31 @@
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::process;
+use std::sync::Mutex;
+
+/// O app sobre o qual esta execução está agindo, quando é um start.
+///
+/// Toda falha de start termina em `user_error` ou `system_error`; registrar
+/// aqui pega todas, inclusive as que ainda não existem, sem depender de cada
+/// ponto de falha lembrar de gravar.
+static FAILURE_CTX: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+
+/// Passa a registrar como última falha do app qualquer erro desta execução.
+pub fn track_failures_for(state_dir: &std::path::Path, name: &str) {
+    if let Ok(mut c) = FAILURE_CTX.lock() {
+        *c = Some((state_dir.to_path_buf(), name.to_string()));
+    }
+}
+
+fn record_tracked_failure(error: &str, message: &str) {
+    let ctx = FAILURE_CTX.lock().ok().and_then(|c| c.clone());
+    if let Some((state_dir, name)) = ctx {
+        // Quem chamou: o boot-recover marca a origem; o resto é a tela.
+        let origin = std::env::var("SELYNT_ORIGIN").unwrap_or_else(|_| "panel".into());
+        let origin = if origin == "boot" { "boot" } else { "panel" };
+        crate::sys::state::record_failure(&state_dir, &name, error, message, origin);
+    }
+}
 
 pub fn success(extra: Value) -> ! {
     let mut obj = serde_json::Map::new();
@@ -12,6 +38,7 @@ pub fn success(extra: Value) -> ! {
 }
 
 pub fn user_error(error: &str, message: &str) -> ! {
+    record_tracked_failure(error, message);
     println!(
         "{}",
         json!({"ok": false, "error": error, "message": message})
@@ -20,6 +47,7 @@ pub fn user_error(error: &str, message: &str) -> ! {
 }
 
 pub fn system_error(error: &str, message: &str) -> ! {
+    record_tracked_failure(error, message);
     println!(
         "{}",
         json!({"ok": false, "error": error, "message": message})

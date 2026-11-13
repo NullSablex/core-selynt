@@ -70,6 +70,15 @@ pub fn sweep_account(state_dir: &Path, username: &str) -> Vec<String> {
             "netguard: '{name}' bound an externally reachable port — stopping"
         ));
         stop_offending_app(state_dir, &name, &meta, &pids, true);
+        // A tela precisa dizer por que o app parou: sem isto ele só aparece
+        // como parado, e o motivo fica num log que ninguém lê.
+        crate::sys::state::record_failure(
+            state_dir,
+            &name,
+            "network_port_forbidden",
+            "the application opened a network port reachable from outside and was stopped",
+            "netguard",
+        );
         stopped.push(name);
     }
 

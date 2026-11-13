@@ -59,7 +59,17 @@ fn describe_app(run_dir: &Path, path: &Path, user: &str) -> Option<Value> {
         "started_at": started_at,
         "memory":     usage.map(|u| u.memory_bytes),
         "cpu_usec":   usage.map(|u| u.cpu_usec),
+        "last_error": read_failure_in(run_dir, &name),
+        "unexpected_stop": status != "RUNNING"
+            && crate::sys::fs::is_regular_file(&run_dir.join(format!("{name}.enabled"))),
     }))
+}
+
+/// A última falha registrada de um app, lida do `.run` da conta.
+fn read_failure_in(run_dir: &Path, name: &str) -> Value {
+    run_dir.parent().map_or(Value::Null, |state| {
+        crate::sys::state::read_failure(state, name)
+    })
 }
 
 /// Every app on the server, for the administrator's overview.

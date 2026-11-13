@@ -54,6 +54,8 @@ pub fn start_app_detached(username: &str, name: &str) -> bool {
     .arg("start")
     .arg(name)
     .env("USERNAME", username)
+    // A falha, se houver, fica registrada como vinda da recuperação no boot.
+    .env("SELYNT_ORIGIN", "boot")
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .output()

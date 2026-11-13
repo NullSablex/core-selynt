@@ -154,6 +154,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // is read first where it applies: it is the pool the per-app limits are
         // divided from, and `user.conf` is unreadable after the drop.
         Commands::Start { name } => {
+            sys::output::track_failures_for(&state_dir, &name);
             let da = limits::usage::read_da_limits(&username);
             limits::usage::ensure_slice_cap(&username, da);
             let spawned = spawn_for(&state_dir, &username, &name, uid, gid, da);
@@ -176,6 +177,7 @@ pub fn plan(command: Commands, ctx: &Ctx<'_>) -> Deferred {
         // the drop it would land outside systemd altogether, with no cgroup of
         // its own, escaping the account cap and invisible to the netguard sweep.
         Commands::Restart { name } => {
+            sys::output::track_failures_for(&state_dir, &name);
             let da = limits::usage::read_da_limits(&username);
             limits::usage::ensure_slice_cap(&username, da);
             if let Ok(meta) = crate::load_app_meta(&state_dir, &name) {

@@ -58,6 +58,11 @@ pub fn cmd_list(state_dir: &Path, dbg: Option<&Value>) -> ! {
         if !meta.node_version.is_empty() {
             app["node_version"] = json!(meta.node_version);
         }
+        // Para a tela alertar: por que caiu, e se caiu sem ninguém pedir.
+        app["last_error"] = crate::sys::state::read_failure(state_dir, name);
+        app["unexpected_stop"] = json!(crate::sys::state::stopped_unexpectedly(
+            state_dir, name, &status
+        ));
         apps.push(app);
     }
 
@@ -70,7 +75,15 @@ pub fn cmd_status(state_dir: &Path, name: &str, dbg: Option<&Value>) -> ! {
     }
     let (status, pid, _) = get_status(state_dir, name);
     let pid_val = pid.map_or(json!(null), |p| json!(p));
-    success(with_debug(json!({ "status": status, "pid": pid_val }), dbg))
+    success(with_debug(
+        json!({
+            "status": status,
+            "pid": pid_val,
+            "last_error": crate::sys::state::read_failure(state_dir, name),
+            "unexpected_stop": crate::sys::state::stopped_unexpectedly(state_dir, name, &status),
+        }),
+        dbg,
+    ))
 }
 
 pub fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Option<&Value>) -> ! {
@@ -87,6 +100,8 @@ pub fn cmd_stop(state_dir: &Path, name: &str, timeout_secs: u64, dbg: Option<&Va
 
     // Clear boot-recovery intent — user explicitly stopped this app.
     let _ = std::fs::remove_file(state_dir.join(".run").join(format!("{name}.enabled")));
+    // Parado de propósito: um alerta de falha antiga não vale mais.
+    crate::sys::state::clear_failure(state_dir, name);
 
     signal_sync();
     success(with_debug(json!({}), dbg))
@@ -432,7 +447,7 @@ fn remove_run_state(state_dir: &Path, name: &str, meta: &AppMeta) {
     let run_dir = state_dir.join(".run");
     // `job` e `job.log` guardam a última execução npm: sem removê-los aqui, um
     // app recriado com o mesmo nome herdaria o resultado do anterior.
-    for ext in &["pid", "meta", "enabled", "job", "job.log"] {
+    for ext in &["pid", "meta", "enabled", "job", "job.log", "last_error"] {
         let _ = std::fs::remove_file(run_dir.join(format!("{name}.{ext}")));
     }
 
