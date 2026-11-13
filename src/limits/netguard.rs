@@ -86,12 +86,11 @@ pub fn stop_app_tree(state_dir: &Path, name: &str, meta: &AppMeta) {
         std::fs::read_to_string(state_dir.join(".run").join(format!("{name}.pid")))
             .ok()
             .and_then(|p| p.trim().parse::<u32>().ok())
-            .map(|pid| {
+            .map_or_default(|pid| {
                 let mut all = vec![pid];
                 all.extend(crate::sys::proc::descendants_of(pid));
                 all
-            })
-            .unwrap_or_default();
+            });
 
     if !pids.is_empty() {
         // Keeps `.enabled`: the app is coming straight back up.

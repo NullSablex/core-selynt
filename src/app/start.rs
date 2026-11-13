@@ -1,7 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -107,10 +107,7 @@ fn refuse_external_port(ctx: &WaitContext<'_>, socket_path: &Path) {
     if !app_has_external_port(ctx.username, ctx.name, ctx.pid) {
         return;
     }
-    let nix_pid = to_nix_pid(ctx.pid);
-    let _ = kill(nix_pid, Signal::SIGTERM);
-    std::thread::sleep(KILL_GRACE);
-    let _ = kill(nix_pid, Signal::SIGKILL);
+    kill_app(ctx);
     cleanup_failed(ctx.pid_file, ctx.meta_file, Some(socket_path));
     user_error("network_port_forbidden", NETWORK_PORT_FORBIDDEN_MSG);
 }
@@ -234,6 +231,7 @@ pub fn spawn_into_scope(
     if !crate::limits::policy::can_run_scopes() {
         return None;
     }
+    clear_orphan_scope(username, name);
     let socket_path = checked_socket_path(state_dir, meta);
     let _ = std::fs::remove_file(&socket_path);
 
@@ -535,6 +533,77 @@ struct WaitContext<'a> {
     meta_file: &'a Path,
 }
 
+/// Encerra tudo o que o app tem no ar: o processo acompanhado e todo o seu
+/// scope.
+///
+/// Matar só o pid acompanhado não basta: com isolamento esse pid é o do
+/// bubblewrap, que não repassa sinal ao filho. O app ficava vivo, órfão, com
+/// o scope ocupado — o painel o via parado e todo start seguinte falhava.
+fn kill_app(ctx: &WaitContext<'_>) {
+    let mut alvos = crate::limits::usage::scope_pids(ctx.username, ctx.name);
+    alvos.push(ctx.pid);
+    for p in &alvos {
+        let _ = kill(to_nix_pid(*p), Signal::SIGTERM);
+    }
+    std::thread::sleep(KILL_GRACE);
+    for p in crate::limits::usage::scope_pids(ctx.username, ctx.name)
+        .into_iter()
+        .chain(std::iter::once(ctx.pid))
+    {
+        let _ = kill(to_nix_pid(p), Signal::SIGKILL);
+    }
+}
+
+/// Encerra processos que sobraram no scope de um app que o painel dá como
+/// parado — resto de uma tentativa anterior que falhou sem limpar.
+///
+/// Sem isso o scope continua carregado, o `systemd-run` recusa criar outro
+/// com o mesmo nome, e o app não volta mais. Só chamado depois de o status
+/// já ter dito que o app não está rodando.
+fn clear_orphan_scope(username: &str, name: &str) {
+    let restos = crate::limits::usage::scope_pids(username, name);
+    if restos.is_empty() {
+        return;
+    }
+    debug(format!(
+        "{name}: {} processo(s) órfão(s) no scope — encerrando",
+        restos.len()
+    ));
+    for p in &restos {
+        let _ = kill(to_nix_pid(*p), Signal::SIGKILL);
+    }
+    for _ in 0..20 {
+        if crate::limits::usage::scope_pids(username, name).is_empty() {
+            break;
+        }
+        std::thread::sleep(READY_POLL_INTERVAL);
+    }
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &scope_unit_name(username, name)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// O andamento do app durante o start: CPU e memória do scope inteiro.
+///
+/// O pid acompanhado, com isolamento, é o do bubblewrap, que só espera o
+/// filho — CPU e memória dele não mudam nunca. Medir por ele fazia todo app
+/// isolado que levasse mais de ~10s para criar o socket ser dado como
+/// travado e morto, como aconteceu num boot com o servidor carregado. Sem
+/// scope (systemd indisponível), mede o próprio pid, como antes.
+fn progress_snapshot(ctx: &WaitContext<'_>) -> Option<ProcessSnapshot> {
+    crate::limits::usage::read_scope_usage(ctx.username, ctx.name).map_or_else(
+        || read_proc_snapshot(ctx.pid),
+        |u| {
+            Some(ProcessSnapshot {
+                cpu_ticks: u.cpu_usec,
+                rss_kb: u.memory_bytes / 1024,
+            })
+        },
+    )
+}
+
 fn cleanup_failed(pid_file: &Path, meta_file: &Path, socket: Option<&Path>) {
     let _ = std::fs::remove_file(pid_file);
     let _ = std::fs::remove_file(meta_file);
@@ -545,10 +614,7 @@ fn cleanup_failed(pid_file: &Path, meta_file: &Path, socket: Option<&Path>) {
 
 fn check_failure_modes(ctx: &WaitContext<'_>, include_socket_cleanup: bool) {
     if app_has_external_port(ctx.username, ctx.name, ctx.pid) {
-        let nix_pid = to_nix_pid(ctx.pid);
-        let _ = kill(nix_pid, Signal::SIGTERM);
-        std::thread::sleep(KILL_GRACE);
-        let _ = kill(nix_pid, Signal::SIGKILL);
+        kill_app(ctx);
         cleanup_failed(
             ctx.pid_file,
             ctx.meta_file,
@@ -572,7 +638,7 @@ fn check_failure_modes(ctx: &WaitContext<'_>, include_socket_cleanup: bool) {
 fn wait_for_socket_file(ctx: &WaitContext<'_>) {
     let deadline = Instant::now() + SOCKET_HARD_TIMEOUT;
     let mut last_check = Instant::now();
-    let mut last_snapshot = read_proc_snapshot(ctx.pid);
+    let mut last_snapshot = progress_snapshot(ctx);
     let mut stuck = 0u32;
 
     loop {
@@ -580,7 +646,7 @@ fn wait_for_socket_file(ctx: &WaitContext<'_>) {
             return;
         }
         if Instant::now() >= deadline {
-            let _ = kill(to_nix_pid(ctx.pid), Signal::SIGKILL);
+            kill_app(ctx);
             cleanup_failed(ctx.pid_file, ctx.meta_file, None);
             system_error(
                 "socket_timeout",
@@ -591,7 +657,7 @@ fn wait_for_socket_file(ctx: &WaitContext<'_>) {
 
         if last_check.elapsed() >= PROGRESS_CHECK_INTERVAL {
             last_check = Instant::now();
-            let current = read_proc_snapshot(ctx.pid);
+            let current = progress_snapshot(ctx);
             stuck = next_stuck_count(stuck, last_snapshot, current);
             last_snapshot = current;
             if stuck >= STUCK_THRESHOLD {
@@ -599,7 +665,7 @@ fn wait_for_socket_file(ctx: &WaitContext<'_>) {
                     "pid={} stuck without progress: {stuck}/{STUCK_THRESHOLD}",
                     ctx.pid
                 ));
-                let _ = kill(to_nix_pid(ctx.pid), Signal::SIGKILL);
+                kill_app(ctx);
                 cleanup_failed(ctx.pid_file, ctx.meta_file, None);
                 system_error(
                     "socket_stuck",
@@ -615,7 +681,7 @@ fn wait_for_socket_file(ctx: &WaitContext<'_>) {
 fn wait_for_socket_accept(ctx: &WaitContext<'_>) {
     let deadline = Instant::now() + SOCKET_ACCEPT_TIMEOUT;
     let mut last_check = Instant::now();
-    let mut last_snapshot = read_proc_snapshot(ctx.pid);
+    let mut last_snapshot = progress_snapshot(ctx);
     let mut stuck = 0u32;
 
     while Instant::now() < deadline {
@@ -626,11 +692,11 @@ fn wait_for_socket_accept(ctx: &WaitContext<'_>) {
 
         if last_check.elapsed() >= PROGRESS_CHECK_INTERVAL {
             last_check = Instant::now();
-            let current = read_proc_snapshot(ctx.pid);
+            let current = progress_snapshot(ctx);
             stuck = next_stuck_count(stuck, last_snapshot, current);
             last_snapshot = current;
             if stuck >= STUCK_THRESHOLD {
-                let _ = kill(to_nix_pid(ctx.pid), Signal::SIGKILL);
+                kill_app(ctx);
                 cleanup_failed(ctx.pid_file, ctx.meta_file, Some(ctx.socket_path));
                 system_error(
                     "socket_stuck",
@@ -642,7 +708,7 @@ fn wait_for_socket_accept(ctx: &WaitContext<'_>) {
         std::thread::sleep(READY_POLL_INTERVAL);
     }
 
-    let _ = kill(to_nix_pid(ctx.pid), Signal::SIGKILL);
+    kill_app(ctx);
     cleanup_failed(ctx.pid_file, ctx.meta_file, Some(ctx.socket_path));
     system_error(
         "socket_not_accepting",
