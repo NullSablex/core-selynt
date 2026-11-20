@@ -170,7 +170,14 @@ pub fn cmd_start(
 
     let socket_path = checked_socket_path(state_dir, &meta);
     let marker_path = state_dir.join(".proxy").join(&meta.host);
-    let _ = std::fs::remove_file(&socket_path);
+    // O socket velho só pode ser apagado antes de o app nascer. Quando o
+    // prelúdio já lançou o app (`spawned_pid`), ele também já apagou o velho, e
+    // o que estiver ali agora é o socket novo: um app rápido o cria antes de
+    // chegarmos aqui, e apagá-lo deixava o painel esperando um socket que não
+    // voltaria — o app era dado como travado sem estar.
+    if spawned_pid.is_none() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
     let _ = std::fs::remove_file(&marker_path);
 
     let pid_file = state_dir.join(".run").join(format!("{name}.pid"));
