@@ -332,6 +332,14 @@ com o modo anterior, para a interface poder avisar quais precisam reiniciar.
 
 ### Fixed
 
+**App rápido era dado como travado ao iniciar**
+- O app é lançado no prelúdio root, e o start segue depois, em outro passo.
+  Esse passo apagava o socket "anterior" — mas o prelúdio já tinha feito
+  isso, e o que estava ali era o socket que o app acabara de criar. Um app
+  que sobe em décimos de segundo perdia o socket e o painel esperava um que
+  não voltava: `socket_stuck` sem o app estar travado. O socket só é apagado
+  quando o app ainda não foi lançado
+
 **Processo zumbi contado como vivo**
 - `is_process_alive` só conferia se `/proc/<pid>` existia, e um processo que
   já morreu mas não foi recolhido (zumbi) ainda tem essa pasta. Um app que
